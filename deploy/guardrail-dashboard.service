@@ -1,0 +1,24 @@
+# GuardRail dashboard (port 4173) plus the watcher it spawns.
+#
+# Install as a user unit:
+#   cp deploy/guardrail-dashboard.service ~/.config/systemd/user/
+#   cp deploy/guardrail.env.example ~/.config/guardrail.env    # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now guardrail-dashboard
+[Unit]
+Description=GuardRail accessibility dashboard and watcher
+After=mongod-local.service
+Wants=mongod-local.service
+
+[Service]
+Type=exec
+WorkingDirectory=%h/DellxNvidia-Hackaton
+EnvironmentFile=-%h/.config/guardrail.env
+# nvm's node is not on systemd's PATH; the scanner and integrity check shell out to node.
+Environment=PATH=%h/.nvm/versions/node/v22.23.2/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 dashboard_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

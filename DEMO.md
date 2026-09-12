@@ -4,10 +4,11 @@ The chain is **scan → insert → patch → verify → record → audit report*
 one command. This file is the startup sequence, the restore path, and an honest
 statement of what is real and what is not.
 
-Working directory: `/home/dell/gb10-main` — a git worktree on `main`.
-Path 2's branch is checked out separately in `/home/dell/DellxNvidia-Hackaton`.
-The two do not share a working tree, so work on either cannot disturb the other's
-files. **They do share the MongoDB database** — see §5.
+Working directory: `/home/dell/DellxNvidia-Hackaton`, on `main`. Path 1's
+pipeline, the GuardRail dashboard and Path 2's harness (`remediation/`) all live
+in this one checkout. **Path 2's harness writes to the same MongoDB database** — see §5.
+
+Health check for everything below in one command: `scripts/mongo-check.sh`.
 
 ---
 
@@ -35,14 +36,14 @@ journalctl --user -u mongod-local -n 50 --no-pager    # if it fails to start
 > kernels ≥ 6.19, SERVER-121912). A stale
 > `/etc/systemd/system/multi-user.target.wants/mongod.service` symlink still
 > dangles and reports a confusing failure if you try. `mongod-local` runs the
-> working tarball build in `/home/dell/mongodb-linux-aarch64-ubuntu2204-7.0.43/`
+> working tarball build in `/home/dell/opt/mongodb/mongodb-7.0.43/`
 > against dbpath `/home/dell/mongodb-data`.
 
 ### b. Confirm port 27017 is reachable
 
 ```bash
 ss -ltn | grep 27017
-/home/dell/mongosh-2.1.4-linux-arm64/bin/mongosh --quiet --eval 'db.runCommand({ping:1})'
+mongosh --quiet --eval 'db.runCommand({ping:1})'
 ```
 
 Expect `127.0.0.1:27017` listening and `{ ok: 1 }`.
@@ -62,7 +63,7 @@ python3 -m db.live_roundtrip      # prints LIVE ROUND-TRIP PASSED, exit 0
 ### c. Run the pipeline
 
 ```bash
-cd /home/dell/gb10-main
+cd /home/dell/DellxNvidia-Hackaton
 MONGODB_URI='mongodb://localhost:27017' MONGODB_DATABASE='scanner' \
   python3 pipeline/run_pipeline.py
 ```
@@ -75,7 +76,21 @@ diff, the patched copy, the functional-check log and a summary — land in
 
 Every stage fails loudly. No stage falls back to placeholder data.
 
-### d. Standalone commands
+### d. Dashboard
+
+The GuardRail dashboard runs as a user service on http://127.0.0.1:4173 and
+starts the watcher itself (one pipeline run per `GUARDRAIL_WATCH_INTERVAL_SECONDS`):
+
+```bash
+systemctl --user status guardrail-dashboard
+journalctl --user -u guardrail-dashboard -n 50 --no-pager
+```
+
+Its settings — including which database it reads (`MONGODB_DATABASE`) — are in
+`~/.config/guardrail.env`; restart the unit after editing. The unit file and a
+template env live in `deploy/`.
+
+### e. Standalone commands
 
 ```bash
 node scripts/a11y-scan.js                        # Path 1 only (exit 1 = violations found)
