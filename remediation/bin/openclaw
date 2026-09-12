@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs the project-pinned OpenClaw (same version as the NemoClaw sandbox image) under the project-local Node 24,
+# because OpenClaw's engine range excludes the Node 25.4 on this laptop. Usage: remediation/bin/openclaw <args...>
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NODE="$ROOT/node_modules/.bin/node"
+[ -x "$NODE" ] || NODE="$(command -v node)"
+exec "$NODE" "$ROOT/node_modules/openclaw/openclaw.mjs" "$@"

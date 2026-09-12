@@ -1,0 +1,18 @@
+{
+  "id": "keyboard-trap#0",
+  "rule_id": "keyboard-trap",
+  "source_tool": "custom",
+  "impact": "critical",
+  "wcag": ["wcag2a", "wcag212"],
+  "description": "Keyboard focus can enter the dialog but cannot leave it",
+  "help": "Escape must close the dialog and return focus to the element that opened it; provide a focusable Close control inside the dialog. Keep Tab cycling inside the dialog while it is open.",
+  "help_url": "https://www.w3.org/WAI/WCAG21/Understanding/no-keyboard-trap.html",
+  "route": "/",
+  "selector": "#settings-dialog",
+  "html": "<div id=\"settings-dialog\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"settings-title\">",
+  "repro": {
+    "open_selector": "#open-settings",
+    "keys": ["Escape", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Tab"],
+    "observed": "focus never left #settings-dialog after 15 Tab presses; dialog still open after Escape; no close/cancel control inside"
+  }
+}

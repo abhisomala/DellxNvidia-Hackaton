@@ -1,0 +1,13 @@
+body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #1f2937; }
+main { max-width: 720px; margin: 40px auto; padding: 0 16px; }
+section { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+h1 { font-size: 1.5rem; } h2 { font-size: 1.1rem; margin-top: 0; }
+button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #b31b1b; background: #b31b1b; color: #fff; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+.icon-btn { padding: 8px; width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+input { font: inherit; padding: 8px; border: 1px solid #9ca3af; border-radius: 6px; margin-right: 8px; }
+.status { margin-top: 12px; color: #065f46; font-weight: 600; min-height: 1.2em; }
+.backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; }
+.dialog { background: #fff; padding: 24px; border-radius: 8px; width: 360px; }
+.dialog label { display: block; margin-bottom: 10px; }
+.hint { margin-right: 8px; color: #4b5563; }

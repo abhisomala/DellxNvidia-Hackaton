@@ -1,0 +1,31 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "__WORKSPACE__"
+    }
+  },
+  "tools": {
+    "allow": [
+      "group:fs"
+    ],
+    "deny": [
+      "browser",
+      "canvas",
+      "cron",
+      "gateway",
+      "sessions_spawn",
+      "subagents",
+      "web_search",
+      "web_fetch",
+      "exec",
+      "process",
+      "image_generate",
+      "music_generate",
+      "video_generate"
+    ]
+  },
+  "skills": {
+    "allowBundled": []
+  },
+  "_comment": "Template for the LOCAL dev backend only (--agent-backend local). No model is set here: pass --model <provider/model> or A11Y_LOCAL_MODEL. In the sandbox the harness uses the installed OpenClaw agent and NemoClaw's own model configuration."
+}
