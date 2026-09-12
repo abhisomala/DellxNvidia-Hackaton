@@ -47,7 +47,9 @@ def jsonable(value):
     return value
 
 
-def pick_default_scan(store: MongoStore, *, any_scan: bool = False) -> dict:
+def pick_default_scan(
+    store: MongoStore, *, any_scan: bool = False, target_app: str | None = None
+) -> dict:
     """Choose the newest scan a reader would mean by "the latest scan".
 
     The ``scans`` collection is shared, and three kinds of document in it would
@@ -64,6 +66,10 @@ def pick_default_scan(store: MongoStore, *, any_scan: bool = False) -> dict:
     ``MongoStore.insert_axe_scan`` writes.  Verification scans have it too, so
     those are excluded via the patches that point at them.  ``--scan-id``
     reports on any scan regardless, and ``--any-scan`` drops both filters.
+    ``target_app`` narrows the search to one monitored site.
+
+    Raises ``LookupError`` when nothing qualifies, so an in-process caller
+    (the dashboard) can render "no report yet" instead of exiting.
     """
     verification_ids = {
         patch["verification_scan_id"]
@@ -72,7 +78,8 @@ def pick_default_scan(store: MongoStore, *, any_scan: bool = False) -> dict:
         )
     }
     skipped: list[str] = []
-    for scan in store.find_scans():  # newest first
+    query = {"target_app": target_app} if target_app else None
+    for scan in store.find_scans(query):  # newest first
         if not any_scan:
             if scan["_id"] in verification_ids:
                 skipped.append(f"{scan['_id']} (verification rescan)")
@@ -90,20 +97,27 @@ def pick_default_scan(store: MongoStore, *, any_scan: bool = False) -> dict:
         return scan
 
     detail = f" (skipped: {', '.join(skipped)})" if skipped else ""
-    raise SystemExit(
-        f"no reportable scan in {store.database.name}.scans{detail} - "
+    scope = f" for {target_app}" if target_app else ""
+    raise LookupError(
+        f"no reportable scan{scope} in {store.database.name}.scans{detail} - "
         "run pipeline/run_pipeline.py first, or pass --scan-id / --any-scan"
     )
 
 
-def collect(store: MongoStore, scan_id: str | None, *, any_scan: bool = False) -> dict:
+def collect(
+    store: MongoStore,
+    scan_id: str | None,
+    *,
+    any_scan: bool = False,
+    target_app: str | None = None,
+) -> dict:
     """Query the real records for one scan and everything cross-referencing it."""
     if scan_id:
         scan = store.get_scan(scan_id)
         if scan is None:
-            raise SystemExit(f"no scan with _id {scan_id} in {store.database.name}.scans")
+            raise LookupError(f"no scan with _id {scan_id} in {store.database.name}.scans")
     else:
-        scan = pick_default_scan(store, any_scan=any_scan)
+        scan = pick_default_scan(store, any_scan=any_scan, target_app=target_app)
 
     patches = store.find_patches({"scan_id": scan["_id"]})
     # audit_log stores the scan/patch references as strings.
@@ -299,6 +313,7 @@ def main() -> int:
         "verification rescan nor a synthetic connectivity test)",
     )
     parser.add_argument("--out-dir", default=str(OUT_DIR))
+    parser.add_argument("--target-app", help="report on the newest scan of one site")
     parser.add_argument(
         "--any-scan",
         action="store_true",
@@ -310,8 +325,12 @@ def main() -> int:
     store = MongoStore(server_selection_timeout_ms=3000)
     try:
         store.ping()
-        data = collect(store, args.scan_id, any_scan=args.any_scan)
+        data = collect(
+            store, args.scan_id, any_scan=args.any_scan, target_app=args.target_app
+        )
         database = store.database.name
+    except LookupError as exc:
+        raise SystemExit(str(exc)) from exc
     finally:
         store.close()
 

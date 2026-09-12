@@ -257,11 +257,15 @@ def report_html(target_app: str) -> str | None:
         raise RuntimeError("Could not load audit-report/generate_report.py")
     report = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(report)
+    store = MongoStore(server_selection_timeout_ms=3000)
     try:
-        scan, patches, events = report.load_audit_data(target_app)
+        data = report.collect(store, None, target_app=target_app)
+        database = store.database.name
     except LookupError:
         return None
-    return report.build_report(scan, patches, events)
+    finally:
+        store.close()
+    return report.render_html(data, database)
 
 
 class GuardRailHandler(SimpleHTTPRequestHandler):
