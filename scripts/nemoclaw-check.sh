@@ -17,9 +17,10 @@ command -v "$NEMOCLAW" || die "$NEMOCLAW not on PATH (install: see DEMO.md, Opti
 command -v openshell || die "openshell not on PATH"
 docker ps >/dev/null 2>&1 || die "docker is not usable by $(id -un) (add the user to the docker group, then log in again)"
 
-step "Ollama serves $MODEL and is reachable from containers (not only 127.0.0.1)"
+step "Ollama serves $MODEL on loopback only (NemoClaw's auth proxy on :11435 fronts it)"
 curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags | grep -q "\"$MODEL\"" || die "ollama does not list $MODEL"
-ss -ltn | grep -qE '(0\.0\.0\.0|\*|\[::\]):11434\b' || die "ollama listens on 127.0.0.1 only; set OLLAMA_HOST=0.0.0.0:11434 (DEMO.md)"
+ss -ltn | grep -qE '(0\.0\.0\.0|\*|\[::\]):11434\b' && die "ollama is bound beyond loopback; NemoClaw refuses that: set OLLAMA_HOST=127.0.0.1:11434 (DEMO.md)"
+ss -ltn | grep -qE ':11435\b' || die "NemoClaw's Ollama proxy is not listening on :11435"
 
 step "sandbox $SANDBOX status"
 "$NEMOCLAW" "$SANDBOX" status || die "nemoclaw $SANDBOX status failed"

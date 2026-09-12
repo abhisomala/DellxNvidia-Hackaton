@@ -130,15 +130,16 @@ reads `nemoclaw:guardrail/ollama:gemma4:26b`. Code: `pipeline/patch_nemoclaw.py`
 One-time host setup (sudo):
 
 ```bash
-sudo usermod -aG docker dell                  # then log out and back in
+sudo usermod -aG docker dell                  # then log out and back in (or prefix commands with sg docker -c)
 sudo mkdir -p /etc/systemd/system/ollama.service.d
-printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\nEnvironment="OLLAMA_CONTEXT_LENGTH=32768"\n' \
+printf '[Service]\nEnvironment="OLLAMA_HOST=127.0.0.1:11434"\nEnvironment="OLLAMA_CONTEXT_LENGTH=32768"\n' \
   | sudo tee /etc/systemd/system/ollama.service.d/nemoclaw.conf
 sudo systemctl daemon-reload && sudo systemctl restart ollama
 ```
 
-`0.0.0.0` lets the sandbox reach Ollama (via `host.openshell.internal`); it also
-exposes port 11434 on the LAN, so firewall it if that matters.
+Keep Ollama on loopback: NemoClaw (v0.0.123) puts its own authenticated proxy on
+`:11435` in front of it for the sandbox, and its onboarding refuses a `0.0.0.0` bind
+when it cannot use passwordless sudo. The context length must be at least 16384.
 
 Install NemoClaw + OpenShell and onboard a sandbox on Ollama (not vLLM, not Nemotron):
 
@@ -146,6 +147,8 @@ Install NemoClaw + OpenShell and onboard a sandbox on Ollama (not vLLM, not Nemo
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | NEMOCLAW_AGENT=openclaw NEMOCLAW_SANDBOX_NAME=guardrail \
   NEMOCLAW_PROVIDER=ollama NEMOCLAW_MODEL=gemma4:26b NEMOCLAW_NON_INTERACTIVE=1 \
   NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 bash
+# if onboarding stops part-way, fix the cause and continue from the failed step:
+#   NEMOCLAW_PROVIDER=ollama NEMOCLAW_MODEL=gemma4:26b nemoclaw onboard --resume --name guardrail --non-interactive
 bash scripts/nemoclaw-check.sh                # status, doctor, policy, one agent turn
 ```
 
