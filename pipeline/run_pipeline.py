@@ -45,7 +45,12 @@ SCANNER = REPO_ROOT / "scripts" / "a11y-scan.js"
 SCANNER_OUTPUT = REPO_ROOT / "reports" / "a11y-report.json"
 DEMO_DIR = REPO_ROOT / "demo"
 RUNS_DIR = REPO_ROOT / "pipeline" / "runs"
-BRIDGE = REPO_ROOT / "pipeline" / "path2_bridge" / "record_to_mongo.py"
+# Path 2's own bridge, now that remediation/ is in this tree. It was
+# previously vendored under pipeline/path2_bridge/ from 81e6cb7 and had
+# gone two commits stale. Same depth (parents[2] resolves the repo root
+# either way), and it reads the same report.mongo_patch.scan_id and
+# status this pipeline writes.
+BRIDGE = REPO_ROOT / "remediation" / "bridge" / "record_to_mongo.py"
 REPORT_GENERATOR = REPO_ROOT / "audit-report" / "generate_report.py"
 INTEGRITY_CHECK = REPO_ROOT / "integrity-check" / "check.js"
 

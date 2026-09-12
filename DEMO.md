@@ -129,8 +129,8 @@ cover both databases (`scanner` and the unrelated `scan_patch_db`).
 - the scan — Playwright + axe-core 4.13.0 over `demo/index.html`, run fresh
 - the finding — `button-name` on `.bag-button`, impact `critical`
 - every database record, written through `db/mongo_store.py`
-- the patch *recording* — done by Path 2's own `record_to_mongo.py`, vendored
-  verbatim in `pipeline/path2_bridge/` (provenance in its README)
+- the patch *recording* — done by Path 2's own `remediation/bridge/record_to_mongo.py`,
+  invoked directly now that Path 2's harness lives in this repository
 - **verification** — the patch is applied to a copy and Path 1 is really re-run
   over it; `verified` comes from that rescan plus the 13-check functional test,
   never from an assertion. Break the patch and the run reports `VERIFIED=False`.
