@@ -5,7 +5,8 @@
  *   openclaw  : `openclaw agent --agent main ...` against a running gateway on this host
  * All three return OpenClaw's JSON envelope { ok, status, final, ... } when --json is honored.
  */
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { run } from './proc.mjs';
 
@@ -15,8 +16,11 @@ function prepareLocalConfig(o) {
   const workspace = join(stateDir, 'workspace');
   mkdirSync(workspace, { recursive: true });
   const cfg = JSON.parse(readFileSync(resolve(o.agentConfig), 'utf8'));
+  delete cfg._comment;
   cfg.agents ??= {}; cfg.agents.defaults ??= {};
   cfg.agents.defaults.workspace = workspace;
+  if (!o.model) throw new Error('the local dev backend needs an explicit model: pass --model <provider/model> (e.g. ollama/qwen3:8b) or set A11Y_LOCAL_MODEL');
+  cfg.agents.defaults.model = { primary: o.model };
   const cfgPath = join(stateDir, 'openclaw.json');
   writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   return { stateDir, cfgPath, workspace };
@@ -36,7 +40,7 @@ function extractEnvelope(stdout) {
 export function describeBackend(o) {
   if (o.agentBackend === 'nemoclaw') return `nemoclaw sandbox "${o.sandbox}" (openclaw agent --agent main inside the sandbox)`;
   if (o.agentBackend === 'openclaw') return `${o.agentBin} agent --agent main (gateway on this host)`;
-  return `${o.agentBin} agent exec (embedded) config=${o.agentConfig}`;
+  return `local embedded openclaw agent (model ${o.model || 'unset'}) config=${o.agentConfig}`;
 }
 
 export async function runTurn(o, message, { log = () => {}, sessionKey = '' } = {}) {
@@ -54,10 +58,12 @@ export async function runTurn(o, message, { log = () => {}, sessionKey = '' } = 
   } else {
     // local embedded agent (OpenClaw 2026.7.x): no gateway; isolated via OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH
     const { stateDir, cfgPath } = prepareLocalConfig(o);
-    argv = [o.agentBin, 'agent', '--local', '--agent', 'main', '--session-key', session, '--json', '--timeout', timeout, '-m', message];
-    env = { OPENCLAW_STATE_DIR: stateDir, OPENCLAW_CONFIG_PATH: cfgPath, OPENCLAW_BROWSER_HEADLESS: '1', OLLAMA_API_KEY: process.env.OLLAMA_API_KEY || 'ollama-local' };
+    const localBin = process.env.A11Y_OPENCLAW_BIN || join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'openclaw'); // pinned build under node 24
+    argv = [localBin, 'agent', '--local', '--agent', 'main', '--session-key', session, '--json', '--timeout', timeout, '-m', message];
+    env = { OPENCLAW_STATE_DIR: stateDir, OPENCLAW_CONFIG_PATH: cfgPath, OPENCLAW_BROWSER_HEADLESS: '1' };
+    if (o.model.startsWith('ollama/') && !process.env.OLLAMA_API_KEY) env.OLLAMA_API_KEY = 'ollama-local'; // OpenClaw enables its Ollama provider via this variable
   }
-  if (o.model) argv.push('--model', o.model);
+  if (o.model && o.agentBackend !== 'local') argv.push('--model', o.model); // local: model is in the generated config
   if (o.thinking) argv.push('--thinking', o.thinking);
   log(`agent turn: ${argv.slice(0, 6).join(' ')} ... (${message.length} chars)`);
   const r = await run(argv, { input, env, timeoutMs: (o.turnTimeout + 90) * 1000, onLine: o.verbose ? (d, s) => process.stderr.write(`[agent:${s}] ${d}`) : undefined });

@@ -13,14 +13,14 @@ export const DEFAULTS = {
   funcCmd: `node "${fx('scanner/functional.mjs')}" --url {url}`,
   buildCmd: 'npm --prefix "{appRoot}" run build --silent',
   serveCmd: '',
-  agentBackend: 'local',       // local | nemoclaw | openclaw
+  agentBackend: process.env.A11Y_AGENT_BACKEND || 'openclaw',   // openclaw (installed agent + its own model config; default) | nemoclaw (host -> sandbox) | local (dev: embedded agent, needs --model)
   execBackend: 'local',        // local | nemoclaw   (where git/build run; the sandbox when the app lives there)
   sandbox: '',                 // nemoclaw sandbox name
   remoteAppRoot: '',           // app path inside the sandbox (exec/agent backend = nemoclaw)
-  agentBin: join(REMEDIATION_DIR, 'bin', 'openclaw'),
+  agentBin: process.env.A11Y_OPENCLAW_BIN || 'openclaw',       // the installed openclaw; the local dev backend falls back to bin/openclaw (pinned build under node 24)
   agentConfig: join(REMEDIATION_DIR, 'config', 'openclaw.local.json'),
   agentStateDir: join(REMEDIATION_DIR, '.state'),
-  model: '',                   // optional --model override for the agent turn
+  model: process.env.A11Y_LOCAL_MODEL || '',   // never set by default: the agent's configured model is used. Required for the local dev backend.
   thinking: '',                // optional --thinking level
   maxAttempts: 3,
   turnTimeout: 420,
@@ -30,9 +30,9 @@ export const DEFAULTS = {
   maxAddedLines: 80,       // diff-size guard: a one-rule fix should be small
   maxRemovedLines: 40,     // and must not drop existing code (whole-file rewrites are allowed but checked)
   maxFiles: 2,
-  judgeUrl: '',            // OpenAI-compatible base URL for the read-only reviewer pass ('' = off)
-  judgeModel: '',
-  judgeKey: '',
+  judgeUrl: process.env.A11Y_JUDGE_URL || process.env.OPENAI_BASE_URL || '',   // reviewer endpoint (OpenAI-compatible); '' = reviewer off
+  judgeModel: process.env.A11Y_JUDGE_MODEL || process.env.OPENAI_MODEL || '',
+  judgeKey: process.env.A11Y_JUDGE_KEY || process.env.OPENAI_API_KEY || '',
 };
 
 export function parseCommon(argv, extra = {}) {

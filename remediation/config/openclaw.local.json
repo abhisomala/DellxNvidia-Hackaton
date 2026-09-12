@@ -1,9 +1,6 @@
 {
   "agents": {
     "defaults": {
-      "model": {
-        "primary": "ollama/qwen3:8b"
-      },
       "workspace": "__WORKSPACE__"
     }
   },
@@ -29,5 +26,6 @@
   },
   "skills": {
     "allowBundled": []
-  }
+  },
+  "_comment": "Template for the LOCAL dev backend only (--agent-backend local). No model is set here: pass --model <provider/model> or A11Y_LOCAL_MODEL. In the sandbox the harness uses the installed OpenClaw agent and NemoClaw's own model configuration."
 }

@@ -58,7 +58,20 @@ The scanner is any command that prints that JSON to stdout (`--scan-cmd`); the f
 that exits non-zero when behavior broke (`--func-cmd`). Both are injected, so the teammate's real scanner and app
 replace the stand-ins in `fixtures/scanner` and `fixtures/demo-app` without code changes.
 
-## Run locally (laptop, Ollama stand-in model)
+## Which model is used
+
+None is set on this branch. By default the harness runs `openclaw agent --agent main` and sends no `--model`, so the
+agent uses whatever its own OpenClaw configuration says. In the NemoClaw sandbox that is NemoClaw's managed model
+behind `inference.local`; nothing here has to change on merge or deploy. The reviewer (gate 5) is off unless an
+OpenAI-compatible endpoint is given (`--judge-url`/`--judge-model`, or `A11Y_JUDGE_URL`/`A11Y_JUDGE_MODEL`,
+or `OPENAI_BASE_URL`/`OPENAI_MODEL`); in the sandbox point it at the same local route.
+
+Backends (`--agent-backend`, or `A11Y_AGENT_BACKEND`):
+- `openclaw` (default): the installed OpenClaw agent on this machine, with its configured model.
+- `nemoclaw`: from the host, `nemoclaw <sandbox> agent --agent main ...` into the sandbox (needs `--sandbox`).
+- `local`: development only; an embedded agent with its own state dir, and you must pass `--model` (or `A11Y_LOCAL_MODEL`).
+
+## Run locally (laptop, development)
 
 ```bash
 cd remediation && npm install                 # self-contained: pins openclaw 2026.7.1 + a local node 24, playwright, axe-core, vite/react for the fixture app
@@ -68,14 +81,17 @@ export A11Y_BROWSER_CHANNEL=chrome            # use installed Chrome (or A11Y_CH
 
 npm run scan -- --url http://127.0.0.1:5174/ --out scan.json      # stand-in scanner (axe + keyboard-trap probe)
 npm run scan:raw -- --url http://127.0.0.1:5174/ > raw.json       # or exact axe.run() JSON
+export A11Y_AGENT_BACKEND=local A11Y_LOCAL_MODEL=ollama/qwen3:8b   # dev-only: embedded agent + a local model of your choice
+export A11Y_JUDGE_URL=http://127.0.0.1:11434/v1 A11Y_JUDGE_MODEL=qwen3:8b   # optional reviewer for dev
 node src/fix.mjs --scan raw.json --id button-name                  # fix one violation (defaults: fixture app, fixture scanner)
 node src/fix.mjs --violation examples/label.json                   # or from a bare violation object
-node src/bench.mjs --runs 3 --thinking off --judge-url http://127.0.0.1:11434/v1 --judge-model qwen3:8b   # every violation x 3
+node src/bench.mjs --runs 3 --thinking off                         # every violation x 3
 ```
 All paths default to the fixtures inside this directory, so the commands work from any working directory.
 
-The local backend runs `openclaw agent --local` under `remediation/bin/openclaw` with its own state dir
-(`remediation/.state`, config from `config/openclaw.local.json`), so it never touches `~/.openclaw`.
+The local backend runs `openclaw agent --local` under `bin/openclaw` (the pinned build on a project-local Node 24)
+with its own state dir (`.state`, config template `config/openclaw.local.json`, model injected from `--model`), so it
+never touches `~/.openclaw`.
 
 ## Run on the GB10 (NemoClaw sandbox)
 
@@ -85,6 +101,10 @@ and the scanner runs on the host against the forwarded port. The harness then dr
 runs git/build inside the sandbox:
 
 ```bash
+# inside the sandbox (default backend; the agent's configured model is used):
+node src/fix.mjs --violation v.json --app-root /sandbox/.openclaw/workspace/demo-app --url http://127.0.0.1:5174/ \
+  --scan-cmd '<scanner command> --url {url}' --func-cmd '<functional check> --url {url}' --build-cmd ''
+# or from the host, driving the sandboxed agent:
 node src/fix.mjs --violation v.json \
   --agent-backend nemoclaw --exec-backend nemoclaw --sandbox my-assistant \
   --remote-app-root /sandbox/.openclaw/workspace/demo-app \
