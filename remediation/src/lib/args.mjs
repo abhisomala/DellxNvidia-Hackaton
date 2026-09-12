@@ -35,11 +35,36 @@ export const DEFAULTS = {
   judgeKey: process.env.A11Y_JUDGE_KEY || process.env.OPENAI_API_KEY || '',
 };
 
+export const AGENT_BACKENDS = ['openclaw', 'nemoclaw', 'local'];
+export const EXEC_BACKENDS = ['local', 'nemoclaw'];
+
+/**
+ * Options are parsed strictly and every bad value throws. A silently-NaN limit is worse than a
+ * crash: `x > NaN` is always false, so a malformed --max-files disables the diff-size guard, and
+ * `attempt <= NaN` skips the retry loop entirely while still reporting an ordinary "failed" run.
+ */
 export function parseCommon(argv, extra = {}) {
   const o = { ...DEFAULTS, ...extra, _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const val = () => argv[++i];
+    const val = () => {
+      if (i + 1 >= argv.length) throw new Error(`${a} needs a value`);
+      return argv[++i];
+    };
+    const num = (opts = {}) => {
+      const { min = 0, integer = true } = opts;
+      const raw = val();
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error(`${a} expects a number, got ${JSON.stringify(raw)}`);
+      if (integer && !Number.isInteger(n)) throw new Error(`${a} expects a whole number, got ${JSON.stringify(raw)}`);
+      if (n < min) throw new Error(`${a} must be >= ${min}, got ${n}`);
+      return n;
+    };
+    const oneOf = (allowed) => {
+      const v = val();
+      if (!allowed.includes(v)) throw new Error(`${a} must be one of ${allowed.join(' | ')}, got ${JSON.stringify(v)}`);
+      return v;
+    };
     switch (a) {
       case '--app-root': o.appRoot = val(); break;
       case '--url': o.url = val(); break;
@@ -47,8 +72,8 @@ export function parseCommon(argv, extra = {}) {
       case '--func-cmd': o.funcCmd = val(); break;
       case '--build-cmd': o.buildCmd = val(); break;
       case '--serve-cmd': o.serveCmd = val(); break;
-      case '--agent-backend': o.agentBackend = val(); break;
-      case '--exec-backend': o.execBackend = val(); break;
+      case '--agent-backend': o.agentBackend = oneOf(AGENT_BACKENDS); break;
+      case '--exec-backend': o.execBackend = oneOf(EXEC_BACKENDS); break;
       case '--sandbox': o.sandbox = val(); break;
       case '--remote-app-root': o.remoteAppRoot = val(); break;
       case '--agent-bin': o.agentBin = val(); break;
@@ -56,14 +81,14 @@ export function parseCommon(argv, extra = {}) {
       case '--agent-state-dir': o.agentStateDir = val(); break;
       case '--model': o.model = val(); break;
       case '--thinking': o.thinking = val(); break;
-      case '--max-attempts': o.maxAttempts = Number(val()); break;
-      case '--turn-timeout': o.turnTimeout = Number(val()); break;
+      case '--max-attempts': o.maxAttempts = num({ min: 1 }); break;
+      case '--turn-timeout': o.turnTimeout = num({ min: 1 }); break;
       case '--out-dir': o.outDir = val(); break;
       case '--keep-failed': o.keepFailed = true; break;
       case '--restore': o.restore = true; break;
-      case '--max-added-lines': o.maxAddedLines = Number(val()); break;
-      case '--max-removed-lines': o.maxRemovedLines = Number(val()); break;
-      case '--max-files': o.maxFiles = Number(val()); break;
+      case '--max-added-lines': o.maxAddedLines = num({ min: 0 }); break;
+      case '--max-removed-lines': o.maxRemovedLines = num({ min: 0 }); break;
+      case '--max-files': o.maxFiles = num({ min: 1 }); break;
       case '--judge-url': o.judgeUrl = val(); break;
       case '--judge-model': o.judgeModel = val(); break;
       case '--judge-key': o.judgeKey = val(); break;
@@ -72,8 +97,8 @@ export function parseCommon(argv, extra = {}) {
       case '--violation': o.violationFile = val(); break;
       case '--scan': o.scanFile = val(); break;
       case '--id': o.id = val(); break;
-      case '--runs': o.runs = Number(val()); break;
-      case '--ids': o.ids = val().split(',').map((s) => s.trim()).filter(Boolean); break;
+      case '--runs': o.runs = num({ min: 1 }); break;
+      case '--ids': o.ids = val().split(',').map((s) => s.trim()).filter(Boolean); break;   // val() throws when the value is missing
       case '-h': case '--help': o.help = true; break;
       default: o._.push(a);
     }

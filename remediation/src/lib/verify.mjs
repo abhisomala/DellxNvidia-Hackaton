@@ -2,20 +2,46 @@ import { run, fill } from './proc.mjs';
 import { GUIDANCE } from './prompt.mjs';
 import { normalizeScan } from './normalize.mjs';
 
-/** Deterministic guard: a single-rule fix must stay small and local. */
+/**
+ * Deterministic guard: a single-rule fix must stay small and local.
+ *
+ * Limits are validated here as well as at parse time: every `x > NaN` is false, so a
+ * non-numeric limit would silently switch its check off rather than rejecting anything.
+ */
 export function guardDiff(o, diff, changedFiles) {
   const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
   const removed = diff.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
   const reasons = [];
-  if (added > o.maxAddedLines) reasons.push(`the change adds ${added} lines; a fix for one rule must add at most ${o.maxAddedLines}. Make a minimal edit instead of rewriting or duplicating code.`);
-  if (removed > (o.maxRemovedLines ?? 40)) reasons.push(`the change removes ${removed} lines; a fix must not delete existing code (at most ${o.maxRemovedLines ?? 40} removed lines). Keep every existing element, handler and line unless it is the one you are fixing.`);
-  if (changedFiles.length > o.maxFiles) reasons.push(`the change touches ${changedFiles.length} files (${changedFiles.join(', ')}); touch at most ${o.maxFiles}.`);
+  const limit = (name, v, fallback) => {
+    if (Number.isFinite(v)) return v;
+    reasons.push(`the ${name} limit is not a number (${JSON.stringify(v)}); refusing to run with a disabled diff guard`);
+    return fallback;
+  };
+  const maxAdded = limit('--max-added-lines', o.maxAddedLines, 80);
+  const maxRemoved = limit('--max-removed-lines', o.maxRemovedLines ?? 40, 40);
+  const maxFiles = limit('--max-files', o.maxFiles, 2);
+  if (added > maxAdded) reasons.push(`the change adds ${added} lines; a fix for one rule must add at most ${maxAdded}. Make a minimal edit instead of rewriting or duplicating code.`);
+  if (removed > maxRemoved) reasons.push(`the change removes ${removed} lines; a fix must not delete existing code (at most ${maxRemoved} removed lines). Keep every existing element, handler and line unless it is the one you are fixing.`);
+  if (changedFiles.length > maxFiles) reasons.push(`the change touches ${changedFiles.length} files (${changedFiles.join(', ')}); touch at most ${maxFiles}.`);
   return { ok: reasons.length === 0, added, removed, files: changedFiles.length, reasons };
 }
 
-/** Read-only reviewer: a second model pass over the diff (no tools, no file access). */
+/**
+ * Read-only reviewer: a second model pass over the diff (no tools, no file access).
+ *
+ * FAILS CLOSED. A configured reviewer that cannot be reached, answers unparseably, or returns
+ * anything other than the literal verdict "pass" REJECTS the patch — a gate that did not run must
+ * never look like a gate that passed. The only ok:true-without-review case is an explicitly
+ * unconfigured reviewer (no --judge-url), which is reported as status 'skipped', not 'passed'.
+ *
+ * Returns { ok, status, ran, skipped, reasons, ... } where status is one of:
+ *   'passed'      — the reviewer ran and approved
+ *   'failed'      — the reviewer ran and rejected
+ *   'unavailable' — the reviewer was configured but could not be reached / did not answer usably
+ *   'skipped'     — no reviewer configured (deliberate opt-out)
+ */
 export async function judge(o, { violation, diff }, { log = () => {} } = {}) {
-  if (!o.judgeUrl) return { skipped: true, ok: true, reasons: [] };
+  if (!o.judgeUrl) return { skipped: true, ran: false, status: 'skipped', ok: true, reasons: [] };
   const g = GUIDANCE[violation.rule_id];
   const system = 'You are a strict senior reviewer for accessibility fixes in a web codebase. You only review; you never rewrite. Answer with a single JSON object and nothing else.';
   const user = [
@@ -34,20 +60,34 @@ export async function judge(o, { violation, diff }, { log = () => {} } = {}) {
   const body = { model: o.judgeModel, temperature: 0, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 800 };
   log(`judge: ${o.judgeUrl} model=${o.judgeModel}`);
   const t0 = Date.now();
+  const unavailable = (why) => {
+    log(`judge unavailable: ${why}`);
+    return { ok: false, ran: false, skipped: false, status: 'unavailable', error: `judge unavailable: ${why}`, reasons: [`the reviewer gate was configured but did not produce a verdict (${why}); refusing to pass an unreviewed patch`], ms: Date.now() - t0 };
+  };
   let text = '';
   try {
     const res = await fetch(`${o.judgeUrl.replace(/\/+$/, '')}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${o.judgeKey || 'unused'}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
+    if (!res.ok) return unavailable(`HTTP ${res.status}`);
     const json = await res.json();
-    text = json.choices?.[0]?.message?.content ?? JSON.stringify(json);
+    const content = json?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') return unavailable(`response carried no message content${json?.error?.message ? `: ${json.error.message}` : ''}`);
+    text = content;
   } catch (e) {
-    return { ok: true, skipped: true, error: `judge unavailable: ${e.message}`, reasons: [] };
+    return unavailable(e.message);
   }
   const clean = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
   const m = clean.match(/\{[\s\S]*\}/);
-  let verdict = { verdict: 'pass', reasons: [] };
-  try { if (m) verdict = JSON.parse(m[0]); } catch { verdict = { verdict: 'pass', reasons: [], unparsed: clean.slice(0, 300) }; }
-  const ok = String(verdict.verdict).toLowerCase() !== 'fail';
-  return { ok, reasons: Array.isArray(verdict.reasons) ? verdict.reasons.map(String) : [], raw: clean.slice(0, 1500), ms: Date.now() - t0 };
+  if (!m) return { ok: false, ran: true, skipped: false, status: 'failed', reasons: [`the reviewer did not answer with a JSON verdict; its reply was: ${clean.slice(0, 300) || '<empty>'}`], raw: clean.slice(0, 1500), ms: Date.now() - t0 };
+  let verdict;
+  try { verdict = JSON.parse(m[0]); } catch (e) {
+    return { ok: false, ran: true, skipped: false, status: 'failed', reasons: [`the reviewer's JSON verdict could not be parsed (${e.message}); its reply was: ${clean.slice(0, 300)}`], raw: clean.slice(0, 1500), ms: Date.now() - t0 };
+  }
+  // Allow-list, not deny-list: only the literal verdict "pass" approves a patch.
+  const word = String(verdict?.verdict ?? '').trim().toLowerCase();
+  const reasons = Array.isArray(verdict?.reasons) ? verdict.reasons.map(String) : [];
+  const ok = word === 'pass';
+  if (!ok && word !== 'fail') reasons.unshift(`the reviewer returned an unrecognised verdict ${JSON.stringify(verdict?.verdict ?? null)}; only "pass" approves a patch`);
+  return { ok, ran: true, skipped: false, status: ok ? 'passed' : 'failed', reasons, raw: clean.slice(0, 1500), ms: Date.now() - t0 };
 }
 
 export const key = (v) => `${v.rule_id}|${v.selector}`;
@@ -58,10 +98,30 @@ export async function runScan(o, { log = () => {} } = {}) {
   const r = await run(cmd, { shell: true, timeoutMs: 180000 });
   if (r.code !== 0) throw new Error(`scanner exited ${r.code}: ${r.stderr.slice(-1500)}`);
   const s = r.stdout.trim();
-  const start = s.indexOf('{');
-  const first = Math.min(...[s.indexOf('{'), s.indexOf('[')].filter((i) => i >= 0));
-  const doc = normalizeScan(JSON.parse(s.slice(first)), { appUrl: o.url });
-  return doc;
+  return normalizeScan(parseScannerOutput(s, r), { appUrl: o.url });
+}
+
+/**
+ * Scanner stdout is untrusted: it may be empty, may be prose, and often carries log noise
+ * before the JSON payload. `Math.min()` of an empty list is Infinity, so the previous
+ * `s.slice(first)` silently produced '' and surfaced a bare "Unexpected end of JSON input"
+ * with no hint that the scanner was the problem.
+ */
+export function parseScannerOutput(s, r = {}) {
+  const context = () => `stdout: ${s.slice(0, 300) || '<empty>'}${s.length > 300 ? `…${s.slice(-200)}` : ''}${r.stderr ? `\nstderr: ${String(r.stderr).slice(-500)}` : ''}`;
+  const starts = [s.indexOf('{'), s.indexOf('[')].filter((i) => i >= 0);
+  if (!starts.length) {
+    throw new Error(`the scanner printed no JSON on stdout (exit ${r.code ?? '?'}). A scanner must print the violations document to stdout.\n${context()}`);
+  }
+  // Candidates, best first: the first brace/bracket, then the start of any later line that
+  // opens a JSON value (skips banners and "[info] ..."-style prefixes).
+  const candidates = [Math.min(...starts)];
+  for (const m of s.matchAll(/^[ \t]*[[{]/gm)) if (!candidates.includes(m.index)) candidates.push(m.index);
+  let lastErr;
+  for (const i of candidates) {
+    try { return JSON.parse(s.slice(i)); } catch (e) { lastErr = e; }
+  }
+  throw new Error(`the scanner's output is not valid JSON (${lastErr.message}).\n${context()}`);
 }
 
 export function compareScans(baseline, after, target) {

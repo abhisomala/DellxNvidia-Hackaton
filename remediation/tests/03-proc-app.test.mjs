@@ -9,7 +9,7 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { lib, opts, gitRepo, put, scratchDir, cleanupAll } from './helpers.mjs';
+import { lib, SRC, opts, gitRepo, put, scratchDir, cleanupAll } from './helpers.mjs';
 
 const P = await import(lib('proc.mjs'));
 const A = await import(lib('app.mjs'));
@@ -122,22 +122,40 @@ describe('HARD: shellQuote must neutralise adversarial filenames', () => {
 });
 
 describe('fill() template substitution', () => {
-  test('substitutes known keys', () => {
-    assert.equal(P.fill('scan --url {url} --root {appRoot}', { url: 'U', appRoot: 'R' }), 'scan --url U --root R');
+  test('substitutes known keys, quoted for the shell', async () => {
+    const cmd = P.fill('node -e "process.stdout.write(process.argv[1]+\'|\'+process.argv[2])" {url} {appRoot}', { url: 'U', appRoot: 'R' });
+    const r = await P.run(cmd, { shell: true });
+    assert.equal(r.stdout, 'U|R');
   });
   test('leaves unknown placeholders alone', () => {
     assert.equal(P.fill('a {nope} b', { url: 'U' }), 'a {nope} b');
   });
-  test('does NOT shell-quote the substituted value (documents the injection surface)', () => {
-    const out = P.fill('scan --url {url}', { url: 'http://h/; touch /tmp/pwned' });
-    assert.doesNotMatch(out, /'/, 'fill performs raw substitution — callers must quote');
+  test('consumes quotes already present in the template (no double quoting)', async () => {
+    const cmd = P.fill('node -e "process.stdout.write(process.argv[1])" "{appRoot}"', { appRoot: '/my app/root' });
+    const r = await P.run(cmd, { shell: true });
+    assert.equal(r.stdout, '/my app/root', 'a pre-quoted placeholder must still yield exactly one argument');
   });
-  test('a filled command is run with shell:true — an injected --url executes', async () => {
+  test('an injected --url cannot execute a second command', async () => {
     const marker = join(scratchDir('fill-'), 'pwned');
     const cmd = P.fill('echo {url}', { url: `ok; touch ${marker}` });
     await P.run(cmd, { shell: true });
     assert.equal(existsSync(marker), false,
-      'a URL value must not be able to execute a second command; {url} needs quoting before it reaches a shell');
+      'a URL value must not be able to execute a second command');
+  });
+  for (const [label, value] of [
+    ['command substitution', 'http://h/$(touch X)'],
+    ['backticks', 'http://h/`touch X`'],
+    ['semicolon chain', 'http://h/;touch X'],
+    ['quote break-out', "http://h/'; touch X; '"],
+  ]) {
+    test(`${label} in a substituted value stays literal`, async () => {
+      const cmd = P.fill('printf %s {url}', { url: value });
+      const r = await P.run(cmd, { shell: true });
+      assert.equal(r.stdout, value);
+    });
+  }
+  test('fillRaw is available for non-shell strings and does NOT quote', () => {
+    assert.equal(P.fillRaw('scan --url {url}', { url: 'http://h/' }), 'scan --url http://h/');
   });
 });
 
@@ -209,26 +227,47 @@ describe('HARD: AppFs failure modes', () => {
     assert.equal(existsSync(join(root, 'dist/bundle.js')), true, 'dist must survive restore()');
   });
 
-  test('gitDiff on a NON-git directory does not silently look like "the agent changed nothing"', async () => {
+  test('gitDiff on a NON-git directory throws instead of looking like "the agent changed nothing"', async () => {
     const root = scratchDir('nogit-');
     writeFileSync(join(root, 'a.jsx'), 'x\n');
     const app = new A.AppFs(opts({ appRoot: root }));
-    const d = await app.gitDiff();
-    assert.notEqual(d.trim(), '',
-      'in a non-git app root gitDiff returns "" — indistinguishable from a well-behaved agent that made no edit; it must surface an error instead');
+    await assert.rejects(() => app.gitDiff(), /git command failed/,
+      'an empty diff from a broken environment must not be indistinguishable from an agent that made no edit');
   });
 
-  test('restore() is destructive to uncommitted work in the app root (documents the blast radius)', async () => {
+  test('changedFiles on a NON-git directory throws rather than reporting a clean tree', async () => {
+    const root = scratchDir('nogit2-');
+    writeFileSync(join(root, 'a.jsx'), 'x\n');
+    const app = new A.AppFs(opts({ appRoot: root }));
+    await assert.rejects(() => app.changedFiles(), /git command failed/,
+      'a false "clean tree" would let fixOne run and mis-attribute whatever appears next');
+  });
+
+  test('the error names the failing command and the directory', async () => {
+    const root = scratchDir('nogit3-');
+    const app = new A.AppFs(opts({ appRoot: root }));
+    const err = await app.changedFiles().catch((e) => e);
+    assert.match(err.message, /git status --porcelain/);
+    assert.match(err.message, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+
+  test('restore() discards everything in scope by design — the operator is protected upstream', async () => {
+    // restore() cannot tell the agent's edits from anyone else's, and discarding is its whole job.
+    // The protection against destroying an operator's work lives in fixOne, which refuses to run
+    // against a dirty checkout (see 07-critical-claims.test.mjs). This test pins BOTH halves of
+    // that contract so neither can regress silently.
     const { root } = gitRepo({ files: { 'tracked.jsx': 'committed\n' } });
-    // A developer's own in-progress work, unrelated to the agent:
-    writeFileSync(join(root, 'tracked.jsx'), "my half-finished feature\n");
-    put(root, 'my-notes.md', 'hours of work\n');
+    writeFileSync(join(root, 'tracked.jsx'), 'agent edit\n');
+    put(root, 'agent-new.jsx', 'agent file\n');
     const app = new A.AppFs(opts({ appRoot: root }));
     await app.restore();
-    assert.equal(readFileSync(join(root, 'tracked.jsx'), 'utf8'), "my half-finished feature\n",
-      'restore() must not discard uncommitted work it did not create');
-    assert.equal(existsSync(join(root, 'my-notes.md')), true,
-      'restore() must not delete untracked files it did not create');
+    assert.equal(readFileSync(join(root, 'tracked.jsx'), 'utf8'), 'committed\n', 'tracked edits are reverted');
+    assert.equal(existsSync(join(root, 'agent-new.jsx')), false, 'new files are removed');
+
+    // and the upstream guard exists:
+    const fixSrc = readFileSync(`${SRC}/src/fix.mjs`, 'utf8');
+    assert.match(fixSrc, /dirty-worktree/,
+      'fixOne must refuse to run against a dirty checkout, or restore() becomes a data-loss hazard');
   });
 
   test('a file the agent created with a shell-hostile name is diffed safely', async () => {

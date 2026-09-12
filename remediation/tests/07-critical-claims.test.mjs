@@ -46,12 +46,30 @@ describe('CRITICAL: the agent is credited with pre-existing uncommitted work', (
       'the agent changed nothing; the operator\'s own uncommitted edit must not be captured, verified and reported as the agent\'s patch');
   });
 
-  test('the harness does not verify a clean baseline before the first agent turn', () => {
+  test('a dirty checkout is reported as dirty-worktree, naming the offending files', async () => {
+    const { root } = gitRepo({ files: { 'src/C.jsx': 'export default function C(){ return <button id="b" />; }\n' } });
+    const bin = scratchDir('bin-');
+    const agentPath = join(bin, 'openclaw');
+    writeFileSync(agentPath, `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ok:true,final:"x"})+"\\n");\n`);
+    chmodSync(agentPath, 0o755);
+    put(root, 'MY_NOTES.md', 'operator work in progress\n');
+
+    const baseline = { schema_version: '1.0', scan: {}, violations: [{ id: 'button-name#0', rule_id: 'button-name', selector: '#b' }] };
+    const o = opts({ appRoot: root, outDir: scratchDir('out-'), agentBackend: 'openclaw', agentBin: agentPath, scanCmd: 'true', buildCmd: '', funcCmd: '', turnTimeout: 20 });
+    const r = await fixOne(o, { id: 'button-name#0', rule_id: 'button-name', selector: '#b', html: '<button id="b"></button>', description: 'd', route: '/' }, baseline);
+
+    assert.equal(r.status, 'dirty-worktree');
+    assert.deepEqual(r.dirty_files, ['MY_NOTES.md']);
+    assert.equal(r.attempts.length, 0, 'the agent must never be invoked against a dirty checkout');
+    assert.match(r.note, /uncommitted change/);
+  });
+
+  test('fixOne establishes a clean baseline before the first agent turn', () => {
     const src = readFileSync(`${SRC}/src/fix.mjs`, 'utf8');
     const loopStart = src.indexOf('for (let attempt = 1');
     const preamble = src.slice(0, loopStart);
-    assert.match(preamble, /gitDiff|status --porcelain|restore\(\)/,
-      'fixOne never checks that --app-root is clean before attributing the worktree diff to the agent');
+    assert.match(preamble, /changedFiles\(\)|gitDiff\(\)|status --porcelain|restore\(\)/,
+      'fixOne must inspect the worktree before attributing its diff to the agent');
   });
 });
 
@@ -77,7 +95,7 @@ describe('CRITICAL: run() timeout against a shell command', () => {
     assert.ok(elapsed < 5000, `run() should resolve near the timeout, took ${elapsed}ms`);
   });
 
-  test('even a SIMPLE shell command outlives its timeout (dash does not exec-optimise here)', async () => {
+  test('a SIMPLE shell command is killed at its timeout (group kill reaches the forked command)', async () => {
     // Mechanism: spawn(cmd, {shell:true}) runs `/bin/sh -c sleep 6`; dash forks rather than
     // execs, so kill() reaps only the shell. The orphaned command keeps the inherited
     // stdout/stderr pipes open, and Node's 'close' event waits on those pipes.
@@ -85,7 +103,7 @@ describe('CRITICAL: run() timeout against a shell command', () => {
     const r = await P.run('sleep 6', { shell: true, timeoutMs: 500 });
     const elapsed = Date.now() - t0;
     assert.ok(elapsed < 3000,
-      `a 500ms timeout should not take ${elapsed}ms; the shell was killed but the command ran to completion holding the pipes`);
+      `a 500ms timeout should not take ${elapsed}ms; the group kill must reach the command the shell forked`);
   });
 
   test('CONTRAST: the argv (non-shell) form used for agent turns DOES time out correctly', async () => {
@@ -95,7 +113,7 @@ describe('CRITICAL: run() timeout against a shell command', () => {
     assert.notEqual(r.code, 0);
   });
 
-  test('consequence: NO verification gate can time out, because all three use shell:true', () => {
+  test('all three verification gates still use shell:true — and are now covered by the group kill', () => {
     const verifySrc = readFileSync(`${SRC}/src/lib/verify.mjs`, 'utf8');
     const appSrc = readFileSync(`${SRC}/src/lib/app.mjs`, 'utf8');
     // runScan, runFunctional and build all pass a string command with shell:true.

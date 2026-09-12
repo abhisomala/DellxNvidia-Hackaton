@@ -5,6 +5,15 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 export const GUIDANCE = JSON.parse(readFileSync(join(here, '..', '..', 'rules', 'guidance.json'), 'utf8'));
 
+/** Scanner- and model-supplied strings are size-capped before they reach the prompt. */
+const MAX_HTML = 2000;
+const MAX_HELP = 2000;
+const MAX_RELATED = 8000;
+export function clip(s, max) {
+  const str = String(s ?? '');
+  return str.length <= max ? str : `${str.slice(0, max)}\n... [truncated ${str.length - max} more characters]`;
+}
+
 export function buildFixPrompt({ violation: v, location: loc, agentAppRoot, functionalHint }) {
   const g = GUIDANCE[v.rule_id];
   const absFile = `${agentAppRoot.replace(/\/+$/, '')}/${loc.file}`;
@@ -15,11 +24,13 @@ export function buildFixPrompt({ violation: v, location: loc, agentAppRoot, func
   lines.push('## Violation');
   lines.push(`- rule_id: ${v.rule_id} (reported by ${v.source_tool || 'scanner'}), impact: ${v.impact || 'unknown'}, WCAG tags: ${(v.wcag || []).join(', ') || 'n/a'}`);
   lines.push(`- description: ${v.description || ''}`);
-  if (v.help) lines.push(`- failure summary: ${v.help}`);
+  if (v.help) lines.push(`- failure summary: ${clip(v.help, MAX_HELP)}`);
   if (v.help_url) lines.push(`- reference: ${v.help_url}`);
   lines.push(`- page route: ${v.route || '/'}`);
   lines.push(`- CSS selector of the failing element: ${v.selector}`);
-  if (v.html) lines.push(`- rendered HTML of the failing element: ${v.html}`);
+  // Scanner-supplied; never trusted for size. A single huge element (or a minified blob) would
+  // otherwise be interpolated raw and dominate the prompt.
+  if (v.html) lines.push(`- rendered HTML of the failing element: ${clip(v.html, MAX_HTML)}`);
   if (v.repro) {
     lines.push(`- how it was reproduced: opened via ${v.repro.open_selector || '?'} then pressed ${(v.repro.keys || []).join(', ')}; observed: ${v.repro.observed || ''}`);
   }
@@ -35,7 +46,7 @@ export function buildFixPrompt({ violation: v, location: loc, agentAppRoot, func
     lines.push('');
     lines.push(`Related file that also references this element (the right place to edit may be here instead): ${abs}`);
     lines.push('```');
-    lines.push(r.snippet);
+    lines.push(clip(r.snippet, MAX_RELATED));
     lines.push('```');
   }
   lines.push('');

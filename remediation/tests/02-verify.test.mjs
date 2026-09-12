@@ -136,10 +136,21 @@ describe('EDGE/HARD: runScan against a misbehaving scanner', () => {
     assert.equal(out.violations[0].rule_id, 'label');
   });
 
-  test('log noise CONTAINING a brace before the JSON is handled or clearly rejected', async () => {
-    const o = opts({ scanCmd: shCmd('process.stdout.write("debug {stale} line\\n" + JSON.stringify({schema_version:"1.0",scan:{},violations:[]}))') });
+  test('log noise CONTAINING a brace before the JSON is recovered from, not fatal', async () => {
+    // `Math.min(indexOf('{'), indexOf('['))` used to latch onto the brace inside the noise and
+    // fail. The payload is now found by falling back to the start of a later JSON line.
+    const doc = JSON.stringify({ schema_version: '1.0', scan: {}, violations: [{ id: 'label#0', rule_id: 'label', selector: '#e' }] });
+    const o = opts({ scanCmd: shCmd(`process.stdout.write("debug {stale} line\\n[info] starting\\n" + ${JSON.stringify(doc)})`) });
+    const out = await V.runScan(o);
+    assert.equal(out.violations.length, 1);
+    assert.equal(out.violations[0].selector, '#e');
+  });
+
+  test('genuinely malformed JSON is still reported with the scanner output in the message', async () => {
+    const o = opts({ scanCmd: shCmd('process.stdout.write("{\\"violations\\": [ broken")') });
     await assert.rejects(() => V.runScan(o), (err) => {
-      assert.match(err.message, /scanner/i, 'a brace in log noise must yield a scanner-level error, not a raw parse error');
+      assert.match(err.message, /scanner/i, 'the error must name the scanner as the source');
+      assert.match(err.message, /broken/, 'and quote what it actually printed');
       return true;
     });
   });
@@ -171,7 +182,9 @@ describe('MAIN: judge reviews a diff', () => {
     try {
       const r = await V.judge(opts({ judgeUrl: s.url, judgeModel: 'm' }), { violation, diff: REAL_DIFF });
       assert.equal(r.ok, true);
-      assert.equal(r.skipped, undefined);
+      assert.equal(r.status, 'passed', 'a genuine approval must be distinguishable from a skipped gate');
+      assert.equal(r.ran, true);
+      assert.ok(!r.skipped);
     } finally { await s.close(); }
   });
 
@@ -190,7 +203,26 @@ describe('MAIN: judge reviews a diff', () => {
   test('judge is skipped (and marked skipped) when no endpoint is configured', async () => {
     const r = await V.judge(opts({ judgeUrl: '' }), { violation, diff: REAL_DIFF });
     assert.equal(r.skipped, true);
+    assert.equal(r.status, 'skipped', 'an unconfigured reviewer reports "skipped", never "passed"');
+    assert.equal(r.ran, false);
     assert.equal(r.ok, true);
+  });
+
+  test('every judge outcome carries a distinct status, so "did not run" never reads as "approved"', async () => {
+    const seen = {};
+    seen.skipped = (await V.judge(opts({ judgeUrl: '' }), { violation, diff: REAL_DIFF })).status;
+    seen.unavailable = (await V.judge(opts({ judgeUrl: 'http://127.0.0.1:1/v1', judgeModel: 'm' }), { violation, diff: REAL_DIFF })).status;
+    const statusFor = async (content) => {
+      const s = await stubServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content } }] })); });
+      try { return (await V.judge(opts({ judgeUrl: s.url, judgeModel: 'm' }), { violation, diff: REAL_DIFF })).status; } finally { await s.close(); }
+    };
+    assert.equal(seen.skipped, 'skipped');
+    assert.equal(seen.unavailable, 'unavailable');
+    assert.notEqual(seen.skipped, seen.unavailable, 'a deliberate opt-out and an unreachable reviewer are different outcomes');
+    assert.equal(await statusFor('{"verdict":"pass"}'), 'passed');
+    assert.equal(await statusFor('{"verdict":"fail","reasons":["x"]}'), 'failed');
+    assert.equal(await statusFor('not json at all'), 'failed');
+    assert.equal(await statusFor('{"verdict":"REJECTED"}'), 'failed');
   });
 
   test('<think> blocks are stripped before parsing', async () => {

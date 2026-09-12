@@ -11,12 +11,27 @@ import { join } from 'node:path';
 import { parseCommon } from './lib/args.mjs';
 import { AppFs, ensureServer } from './lib/app.mjs';
 import { runScan } from './lib/verify.mjs';
+import { describeBackend } from './lib/agent.mjs';
 import { fixOne, log } from './fix.mjs';
 
-const o = parseCommon(process.argv.slice(2), { runs: 3 });
+// Bad options and an unreachable app are operator errors, not crashes: report them the way
+// fix.mjs does instead of dying with an unhandled rejection and a stack trace.
+let o;
+try {
+  o = parseCommon(process.argv.slice(2), { runs: 3 });
+} catch (err) {
+  log(`bad options: ${err.message}`);
+  process.exit(1);
+}
 o.restore = true;
 const app = new AppFs(o);
-const server = await ensureServer(o.url, o.serveCmd, { log });
+let server;
+try {
+  server = await ensureServer(o.url, o.serveCmd, { log });
+} catch (err) {
+  log(`fatal: ${err.message}`);
+  process.exit(1);
+}
 try {
   await app.restore();
   const baseline = await runScan(o, { log });
@@ -40,10 +55,21 @@ try {
   const summary = {};
   for (const r of rows) { summary[r.id] ??= { fixed: 0, runs: 0, attempts: [] }; summary[r.id].runs++; if (r.status === 'fixed') summary[r.id].fixed++; summary[r.id].attempts.push(r.attempts); }
   const md = ['| violation | run | status | attempts | seconds | files | failure |', '|---|---|---|---|---|---|---|', ...rows.map((r) => `| ${r.id} | ${r.run} | ${r.status} | ${r.attempts} | ${r.duration_s} | ${r.files} | ${r.fail_reason} |`), '', '**Summary**', ...Object.entries(summary).map(([id, s]) => `- ${id}: ${s.fixed}/${s.runs} fixed, attempts ${s.attempts.join('/')}`)].join('\n');
-  writeFileSync(join(o.outDir, `bench-${stamp}.json`), JSON.stringify({ backend: rows.length ? undefined : null, runs: o.runs, rows, summary }, null, 2));
+  // `backend` must record what produced these numbers: two archives with different fix rates
+  // are otherwise unattributable to the backend/model that produced them.
+  writeFileSync(join(o.outDir, `bench-${stamp}.json`), JSON.stringify({ backend: describeBackend(o), model: o.model || null, runs: o.runs, rows, summary }, null, 2));
   writeFileSync(join(o.outDir, `bench-${stamp}.md`), md);
   process.stdout.write(md + '\n');
-  process.exitCode = rows.every((r) => r.status === 'fixed') ? 0 : 1;
+  // `[].every(...)` is vacuously true: a bench where every id was skipped must NOT report success.
+  if (!rows.length) {
+    log('bench executed ZERO runs (no requested violation was present in the baseline); reporting failure');
+    process.exitCode = 2;
+  } else {
+    process.exitCode = rows.every((r) => r.status === 'fixed') ? 0 : 1;
+  }
+} catch (err) {
+  log(`fatal: ${err.message}`);
+  process.exitCode = 1;
 } finally {
   server.stop();
 }

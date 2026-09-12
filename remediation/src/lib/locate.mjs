@@ -43,7 +43,8 @@ function scoreFile(content, t, rule = '') {
   for (const a of t.attrs) {
     const [k, val] = a.split('=');
     const rx = new RegExp(`\\b${escapeRx(k)}\\s*=\\s*["'{\`]\\s*${escapeRx(val)}`);
-    if (find(rx) >= 0) score += 1;
+    const i = find(rx);
+    if (i >= 0) { score += 1; if (line == null) line = i + 1; }
   }
   for (const tx of t.text) {
     const words = tx.split(' ').filter((w) => w.length > 2).slice(0, 4);
@@ -57,7 +58,7 @@ export function numbered(content, from = 1) {
 }
 
 /** Returns { file, line, snippet, snippetFrom, snippetTo, method, candidates } */
-export async function locate(app, v, { maxWholeFile = 220, window = 40 } = {}) {
+export async function locate(app, v, { maxWholeFile = 220, window = 40, maxRelatedBytes = 8000, maxSnippetBytes = 60000 } = {}) {
   const t = tokensFor(v);
   let file = null, line = null, method = 'search', candidates = [];
   if (v.source?.file && (app.local ? existsSync(join(app.root, v.source.file)) : true)) {
@@ -84,13 +85,17 @@ export async function locate(app, v, { maxWholeFile = 220, window = 40 } = {}) {
     try {
       const txt = await app.readFile(c.file);
       const ls = txt.split('\n');
-      if (ls.length <= 200) related.push({ file: c.file, line: c.line, snippet: txt, totalLines: ls.length });
+      // Cap by BYTES as well as lines: a one-line minified bundle passes any line-count test
+      // and would be embedded whole (twice, counting the main file).
+      if (ls.length <= 200 && txt.length <= maxRelatedBytes) related.push({ file: c.file, line: c.line, snippet: txt, totalLines: ls.length });
     } catch {}
   }
   const content = await app.readFile(file);
   const lines = content.split('\n');
   let from = 1, to = lines.length;
   if (lines.length > maxWholeFile && line) { from = Math.max(1, line - window); to = Math.min(lines.length, line + window); }
-  const snippet = lines.slice(from - 1, to).join('\n'); // exact text, no prefixes: the agent's edit tool needs verbatim old-text
-  return { file, line, snippet, snippetFrom: from, snippetTo: to, totalLines: lines.length, method, tokens: t, candidates, related };
+  let snippet = lines.slice(from - 1, to).join('\n'); // exact text, no prefixes: the agent's edit tool needs verbatim old-text
+  let truncated = false;
+  if (snippet.length > maxSnippetBytes) { snippet = snippet.slice(0, maxSnippetBytes); truncated = true; }
+  return { file, line, snippet, snippetFrom: from, snippetTo: to, totalLines: lines.length, truncated, method, tokens: t, candidates, related };
 }

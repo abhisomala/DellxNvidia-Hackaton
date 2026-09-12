@@ -14,25 +14,28 @@ const L = await import(lib('locate.mjs'));
 const PR = await import(lib('prompt.mjs'));
 const A = await import(lib('app.mjs'));
 const { fixOne } = await import(`${SRC}/src/fix.mjs`);
+const P = await import(lib('proc.mjs'));
 after(cleanupAll);
 
 // ── NaN silently disables the safety guard ────────────────────────────────────
 
-describe('NaN limits silently disable the diff-size guard', () => {
-  test('--max-files with a non-numeric value must not switch the file-count check off', () => {
-    const o = AR.parseCommon(['--max-files', 'all']);
-    // Keep the diff small so ONLY the file-count check can reject it.
-    const nineFiles = Array.from({ length: 9 }, (_, i) => `f${i}.jsx`);
-    const g = V.guardDiff(o, '+x\n', nineFiles);
-    assert.equal(g.ok, false,
-      'Number("all") is NaN and `9 > NaN` is false, so a 9-file change sails past the file-count guard');
-    assert.ok(g.reasons.some((r) => /touches 9 files/.test(r)), 'the rejection must name the file count');
+describe('NaN limits must never silently disable the diff-size guard', () => {
+  // The guard is only as good as its limits: `x > NaN` is always false, so a malformed
+  // limit silently switches the check off. These are now rejected at parse time.
+  test('--max-files with a non-numeric value is rejected before a run starts', () => {
+    assert.throws(() => AR.parseCommon(['--max-files', 'all']), /expects a number/);
   });
 
-  test('--max-added-lines with a non-numeric value must not switch the size check off', () => {
-    const o = AR.parseCommon(['--max-added-lines', '80x']);
-    const g = V.guardDiff(o, '+x\n'.repeat(5000), ['a.jsx']);
-    assert.equal(g.ok, false, 'a 5000-line addition must still be rejected');
+  test('--max-added-lines with a non-numeric value is rejected before a run starts', () => {
+    assert.throws(() => AR.parseCommon(['--max-added-lines', '80x']), /expects a number/);
+  });
+
+  test('a NaN limit reaching guardDiff directly would disable the check (why parsing must reject it)', () => {
+    // Defence in depth: if a NaN ever reaches guardDiff by another route, the guard must not
+    // silently pass a 9-file, 5000-line rewrite.
+    const nineFiles = Array.from({ length: 9 }, (_, i) => `f${i}.jsx`);
+    const g = V.guardDiff({ maxAddedLines: NaN, maxRemovedLines: NaN, maxFiles: NaN }, '+x\n'.repeat(5000), nineFiles);
+    assert.equal(g.ok, false, 'guardDiff must treat a non-numeric limit as a rejection, not as "no limit"');
   });
 });
 
@@ -139,28 +142,73 @@ describe('agent-created files with unusual names must not vanish from the diff',
 // ── bench: an empty run must not report success ───────────────────────────────
 
 describe('bench.mjs exit code', () => {
-  test('rows.every() on an empty array makes a zero-run bench exit 0', () => {
-    const rows = [];
-    const exitCode = rows.every((r) => r.status === 'fixed') ? 0 : 1;
-    assert.notEqual(exitCode, 0,
-      'a bench where every --ids entry was skipped produces no rows and still reports overall success');
+  test('a bench that executed ZERO runs does not exit 0', async () => {
+    // Drives the real bench.mjs: every requested id is absent from the baseline, so no run happens.
+    const { createServer } = await import('node:http');
+    const srv = createServer((req, res) => { res.writeHead(200); res.end('ok'); });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${srv.address().port}/`;
+    const { root } = gitRepo({ files: { 'src/C.jsx': 'export default function C(){ return <b/>; }\n' } });
+    const bin = scratchDir('bin-');
+    const scanPath = join(bin, 'scan.mjs');
+    writeFileSync(scanPath, `process.stdout.write(JSON.stringify({schema_version:'1.0',scan:{},violations:[{id:'label#0',rule_id:'label',selector:'#e'}]}));`);
+    try {
+      const r = await P.run(['node', `${SRC}/src/bench.mjs`,
+        '--app-root', root, '--url', url, '--out-dir', scratchDir('bout-'),
+        '--scan-cmd', `node ${JSON.stringify(scanPath)}`,
+        '--build-cmd', '', '--func-cmd', '',
+        '--ids', 'does-not-exist#0', '--runs', '1',
+      ], { timeoutMs: 60000 });
+      assert.notEqual(r.code, 0,
+        `a bench where every --ids entry was skipped produced no rows and still reported success (exit ${r.code})`);
+    } finally { srv.close(); }
+  });
+
+  test('the bench archive records which backend produced the numbers', () => {
+    const src = readFileSync(`${SRC}/src/bench.mjs`, 'utf8');
+    assert.doesNotMatch(src, /backend: rows\.length \? undefined : null/,
+      'the backend field was vacuous in both branches, so archives could not be attributed');
+    assert.match(src, /backend: describeBackend\(o\)/);
   });
 });
 
 // ── skipped gates are reported as passed gates ────────────────────────────────
 
 describe('skipped gates must be distinguishable from passed gates in the report', () => {
-  test('--build-cmd "" and --func-cmd "" do not produce build_ok:true / functional_passed:true', async () => {
-    const app = { build: async () => ({ code: 0, stdout: '', stderr: '', skipped: true }) };
-    const doc = JSON.stringify({ schema_version: '1.0', scan: {}, violations: [] });
-    const o = opts({ scanCmd: `node -e ${JSON.stringify(`process.stdout.write(${JSON.stringify(doc)})`)}`, funcCmd: '' });
-    const baseline = { violations: [{ id: 'l#0', rule_id: 'label', selector: '#e' }] };
-    const vr = await V.verify(o, app, baseline, { rule_id: 'label', selector: '#e' }, { diff: '+x\n', changedFiles: ['a.jsx'] });
-    // This is what fix.mjs:95 writes into report.json:
-    const reported = { build_ok: vr.build?.ok, functional_passed: vr.functional?.passed };
-    assert.notEqual(reported.build_ok, true,
-      'report.json asserts build_ok:true for a build that never ran');
-    assert.notEqual(reported.functional_passed, true,
-      'report.json asserts functional_passed:true for a functional check that never ran');
+  test('--build-cmd "" and --func-cmd "" are recorded as skipped, never as passed, in report.json', async () => {
+    // The real contract is what fix.mjs writes to disk, so drive the whole loop and read it back.
+    const COMPONENT = 'export default function C(){ return <button id="b" onClick={go} />; }\n';
+    const { root } = gitRepo({ files: { 'src/C.jsx': COMPONENT } });
+    const bin = scratchDir('bin-');
+    const outDir = scratchDir('out-');
+    const agentPath = join(bin, 'openclaw');
+    writeFileSync(agentPath, `#!/usr/bin/env node
+const fs = require('fs');
+const p = ${JSON.stringify(join(root, 'src/C.jsx'))};
+fs.writeFileSync(p, fs.readFileSync(p,'utf8').replace('id="b"','id="b" aria-label="Go"'));
+process.stdout.write(JSON.stringify({ok:true,final:"done"})+"\\n");
+`);
+    chmodSync(agentPath, 0o755);
+    const scanPath = join(bin, 'scan.mjs');
+    writeFileSync(scanPath, `
+import { readFileSync } from 'node:fs';
+const src = readFileSync(${JSON.stringify(join(root, 'src/C.jsx'))}, 'utf8');
+process.stdout.write(src.includes('aria-label')
+  ? JSON.stringify({schema_version:'1.0',scan:{},violations:[]})
+  : JSON.stringify({schema_version:'1.0',scan:{},violations:[{id:'button-name#0',rule_id:'button-name',selector:'#b'}]}));
+`);
+    const baseline = { schema_version: '1.0', scan: {}, violations: [{ id: 'button-name#0', rule_id: 'button-name', selector: '#b' }] };
+    const o = opts({ appRoot: root, outDir, agentBackend: 'openclaw', agentBin: agentPath, scanCmd: `node ${JSON.stringify(scanPath)}`, buildCmd: '', funcCmd: '', turnTimeout: 20 });
+    const r = await fixOne(o, { id: 'button-name#0', rule_id: 'button-name', selector: '#b', html: '<button id="b"></button>', description: 'd', route: '/' }, baseline);
+
+    assert.equal(r.status, 'fixed', `expected a verified fix, got ${r.status}: ${r.error || ''}`);
+    const v = r.attempts.at(-1).verify;
+    assert.notEqual(v.build_ok, true, 'a build that never ran must not be recorded as build_ok:true');
+    assert.notEqual(v.functional_passed, true, 'a functional check that never ran must not be recorded as passed');
+    assert.equal(v.gates.build, 'skipped');
+    assert.equal(v.gates.functional, 'skipped');
+    assert.equal(v.gates.reviewer, 'skipped', 'no --judge-url means the reviewer was skipped, not passed');
+    assert.equal(v.gates.guard, 'passed');
+    assert.equal(v.gates.rescan, 'passed');
   });
 });

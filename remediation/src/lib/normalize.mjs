@@ -20,8 +20,18 @@ function routeOf(url) {
 
 export function isAxeResults(doc) { return !!doc && Array.isArray(doc.violations) && doc.violations.every(isAxeResult) && (doc.testEngine || doc.passes || doc.url || doc.violations.some((v) => v.nodes)); }
 export function isAxeResult(v) { return !!v && typeof v.id === 'string' && Array.isArray(v.nodes) && !('rule_id' in v); }
-/** Teammate's MongoDB `scans` document: { _id?, timestamp, target_app, violations: [{ rule_id, selector, severity, description, source_file, ... }] } */
-export function isMongoScan(doc) { return !!doc && Array.isArray(doc.violations) && ('target_app' in doc || doc.violations.some(isMongoViolation)) && !doc.schema_version; }
+/**
+ * Teammate's MongoDB `scans` document: { _id?, timestamp, target_app, violations: [{ rule_id, selector, severity, description, source_file, ... }] }
+ *
+ * A document carrying raw axe `Result`s is NEVER a Mongo scan, even when it also has a
+ * `target_app`: the Mongo branch would pass those entries through unexpanded, leaving rule_id
+ * and selector undefined so every key() became "undefined|undefined".
+ */
+export function isMongoScan(doc) {
+  return !!doc && Array.isArray(doc.violations) && !doc.schema_version
+    && !doc.violations.some(isAxeResult)
+    && ('target_app' in doc || doc.violations.some(isMongoViolation));
+}
 export function isMongoViolation(v) { return !!v && typeof v.rule_id === 'string' && ('severity' in v || 'source_file' in v) && !('impact' in v && 'html' in v); }
 const SEVERITY_TO_IMPACT = { low: 'minor', minor: 'minor', medium: 'moderate', moderate: 'moderate', high: 'serious', serious: 'serious', critical: 'critical' };
 export function mongoViolationToOurs(v, i = 0, route = '/') {
@@ -47,6 +57,26 @@ export function mongoViolationToOurs(v, i = 0, route = '/') {
 export function isOurDoc(doc) { return !!doc && Array.isArray(doc.violations) && doc.violations.every((v) => v && typeof v.rule_id === 'string'); }
 export function isOurViolation(v) { return !!v && typeof v.rule_id === 'string' && typeof v.selector === 'string'; }
 
+/**
+ * Guarantee the fields the pipeline indexes on. `selector` is half of the identity key
+ * (verify.key = `${rule_id}|${selector}`), so it must never be undefined — an undefined
+ * selector stringifies to "undefined" and silently collides with every other selector-less
+ * violation of the same rule. A violation that genuinely has no selector keeps '' and is
+ * refused at selection time by pickViolation, where the operator can see why.
+ */
+export function coerceViolation(v, i = 0, route = '/') {
+  return {
+    ...v,
+    id: typeof v.id === 'string' ? v.id : `${v.rule_id}#${i}`,
+    rule_id: v.rule_id,
+    selector: typeof v.selector === 'string' ? v.selector : '',
+    impact: v.impact || 'unknown',
+    route: v.route || route,
+    description: v.description || '',
+    html: v.html || '',
+  };
+}
+
 export function axeResultToViolations(v, { route = '/', startIndex = 0 } = {}) {
   return (v.nodes || []).map((node, i) => ({
     id: `${v.id}#${startIndex + i}`,
@@ -70,13 +100,13 @@ export function axeResultToViolations(v, { route = '/', startIndex = 0 } = {}) {
 
 /** Normalize any accepted shape into { schema_version, scan, violations } (never mutates the input). */
 export function normalizeScan(doc, { appUrl = '' } = {}) {
-  if (isOurDoc(doc) && doc.schema_version) return doc;
+  if (isOurDoc(doc) && doc.schema_version) return { ...doc, violations: doc.violations.map((v, i) => coerceViolation(v, i, routeOf(appUrl))) };
   if (isMongoScan(doc)) {
     const route = routeOf(appUrl);
     return {
       schema_version: '1.0',
       scan: { tool: 'mongo-scan', app_url: appUrl, timestamp: doc.timestamp ? String(doc.timestamp) : new Date().toISOString(), target_app: doc.target_app, mongo_scan_id: doc._id ? String(doc._id.$oid || doc._id) : undefined },
-      violations: doc.violations.map((v, i) => (isMongoViolation(v) ? mongoViolationToOurs(v, i, route) : v)),
+      violations: doc.violations.map((v, i) => (isMongoViolation(v) ? mongoViolationToOurs(v, i, route) : coerceViolation(v, i, route))),
     };
   }
   if (isAxeResults(doc)) {
@@ -91,8 +121,20 @@ export function normalizeScan(doc, { appUrl = '' } = {}) {
   if (Array.isArray(doc) && doc.every(isAxeResult)) {
     return { schema_version: '1.0', scan: { tool: 'axe-core', app_url: appUrl, timestamp: new Date().toISOString() }, violations: doc.flatMap((v) => axeResultToViolations(v, { route: routeOf(appUrl) })) };
   }
-  if (isOurDoc(doc)) return { schema_version: '1.0', scan: doc.scan || { tool: 'unknown', app_url: appUrl, timestamp: new Date().toISOString() }, violations: doc.violations };
+  if (isOurDoc(doc)) return { schema_version: '1.0', scan: doc.scan || { tool: 'unknown', app_url: appUrl, timestamp: new Date().toISOString() }, violations: doc.violations.map((v, i) => coerceViolation(v, i, routeOf(appUrl))) };
   throw new Error('unrecognized scan document: expected axe-core AxeResults, an axe Result[] array, a MongoDB scans document ({target_app, violations:[{rule_id, selector, severity, description, source_file}]}), or a schema-1.0 document');
+}
+
+/**
+ * A violation with no selector cannot be located, cannot be matched against a rescan, and
+ * cannot be confirmed fixed — refuse it here, where the operator can see why, rather than
+ * letting it flow on as the key "rule|".
+ */
+function requireSelector(v) {
+  if (!v.selector) {
+    throw new Error(`violation ${v.id || v.rule_id} has no selector; rule_id + selector identify a violation, so it cannot be located or verified. Fix the scanner to emit a CSS selector for this element.`);
+  }
+  return v;
 }
 
 /** Pick one violation out of any accepted shape. `id` may be "rule#index", a bare rule id (first node), or a CSS selector. */
@@ -110,5 +152,6 @@ export function pickViolation(doc, id, { appUrl = '' } = {}) {
   if (!id) throw new Error(`input holds ${scan.violations.length} violation(s); pass --id <rule#index | rule | selector> (available: ${scan.violations.map((v) => v.id).join(', ')})`);
   const v = scan.violations.find((x) => x.id === id) || scan.violations.find((x) => x.rule_id === id) || scan.violations.find((x) => x.selector === id);
   if (!v) throw new Error(`violation "${id}" not found (available: ${scan.violations.map((v) => v.id).join(', ')})`);
+  requireSelector(v);
   return { violation: v, scan };
 }

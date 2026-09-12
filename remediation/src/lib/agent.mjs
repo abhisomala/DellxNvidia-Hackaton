@@ -55,6 +55,8 @@ export async function runTurn(o, message, { log = () => {}, sessionKey = '' } = 
     argv = ['nemoclaw', o.sandbox, 'agent', '--agent', 'main', '--session-key', session, '--json', '--timeout', timeout, '-m', message];
   } else if (o.agentBackend === 'openclaw') {
     argv = [o.agentBin, 'agent', '--agent', 'main', '--session-key', session, '--json', '--timeout', timeout, '-m', message];
+  } else if (o.agentBackend && o.agentBackend !== 'local') {
+    throw new Error(`unknown agent backend ${JSON.stringify(o.agentBackend)}; expected one of openclaw | nemoclaw | local`);
   } else {
     // local embedded agent (OpenClaw 2026.7.x): no gateway; isolated via OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH
     const { stateDir, cfgPath } = prepareLocalConfig(o);
@@ -68,6 +70,14 @@ export async function runTurn(o, message, { log = () => {}, sessionKey = '' } = 
   log(`agent turn: ${argv.slice(0, 6).join(' ')} ... (${message.length} chars)`);
   const r = await run(argv, { input, env, timeoutMs: (o.turnTimeout + 90) * 1000, onLine: o.verbose ? (d, s) => process.stderr.write(`[agent:${s}] ${d}`) : undefined });
   const envelope = extractEnvelope(r.stdout);
-  const final = envelope?.final ?? envelope?.payloads?.map((p) => p.text).join('\n') ?? r.stdout.trim();
-  return { ok: r.code === 0 && (envelope ? envelope.ok !== false : true), code: r.code, final, envelope, stderr: r.stderr, stdout: r.stdout, ms: r.ms, argv: argv.map((a) => (a === message ? '<message>' : a)) };
+  // Only a parsed envelope yields a `final`. Falling back to raw stdout would present a crash
+  // dump or a stack trace as though it were the agent's considered answer, and that string is
+  // what lands in agent-reply-N.md and in report.attempts[].reply.
+  const final = envelope ? (envelope.final ?? envelope.payloads?.map((p) => p.text).join('\n') ?? '') : '';
+  return {
+    ok: r.code === 0 && !!envelope && envelope.ok !== false,
+    code: r.code, final, envelope, envelope_missing: !envelope,
+    stderr: r.stderr, stdout: r.stdout, ms: r.ms, timedOut: r.timedOut,
+    argv: argv.map((a) => (a === message ? '<message>' : a)),
+  };
 }

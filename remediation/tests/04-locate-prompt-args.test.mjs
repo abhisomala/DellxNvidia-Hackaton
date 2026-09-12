@@ -232,12 +232,14 @@ describe('MAIN: buildRetryPrompt carries failure feedback back to the agent', ()
     assert.match(p, /IDENTICAL to the one before/);
   });
 
-  test('feedback survives a no-op attempt sandwiched between two failures', () => {
-    // fix.mjs replaces `previous` with { diff: '', verify: {} } on a no-change turn,
-    // discarding the real verification feedback from the attempt before it.
-    const p = PR.buildRetryPrompt({ violation: v, location: loc, agentAppRoot: '/app', attempt: 3, previous: { diff: '', verify: {} } });
-    assert.match(p, /build FAILED|still reports rule|functional check FAILED|REJECTED/,
-      'attempt 3 must still know WHY attempt 1 was rejected, not just that attempt 2 was a no-op');
+  test('a no-op turn still renders the carried-over failure reason alongside "you changed nothing"', () => {
+    // fix.mjs carries the last real verify forward across a no-change turn, so attempt 3 still
+    // knows WHY attempt 1 was rejected — not merely that attempt 2 did nothing.
+    const carried = { build: { ok: false, output: 'Unexpected token <' } };
+    const p = PR.buildRetryPrompt({ violation: v, location: loc, agentAppRoot: '/app', attempt: 3, previous: { diff: '', verify: carried, noChange: true } });
+    assert.match(p, /changed NO files on disk/, 'the no-op is still called out');
+    assert.match(p, /build FAILED/, 'and the original rejection reason survives');
+    assert.match(p, /Unexpected token </);
   });
 });
 
@@ -266,32 +268,45 @@ describe('MAIN: parseCommon', () => {
 });
 
 describe('EDGE/HARD: parseCommon input validation', () => {
-  test('a non-numeric --max-attempts is rejected rather than becoming NaN', () => {
-    const o = AR.parseCommon(['--max-attempts', 'three']);
-    assert.ok(!Number.isNaN(o.maxAttempts),
-      'NaN maxAttempts makes the retry loop run zero times and report a silent failure');
+  test('a non-numeric --max-attempts throws rather than becoming NaN', () => {
+    assert.throws(() => AR.parseCommon(['--max-attempts', 'three']), /expects a number/,
+      'NaN maxAttempts would make the retry loop run zero times and report a silent failure');
   });
-  test('a flag given as the LAST argument with no value is rejected', () => {
-    const o = AR.parseCommon(['--url']);
-    assert.notEqual(o.url, undefined,
-      'a value-less trailing flag must error, not silently set the option to undefined');
+  test('a flag given as the LAST argument with no value throws', () => {
+    assert.throws(() => AR.parseCommon(['--url']), /--url needs a value/);
   });
   test('--max-attempts 0 is rejected (the loop would never run)', () => {
-    const o = AR.parseCommon(['--max-attempts', '0']);
-    assert.ok(o.maxAttempts >= 1, 'zero attempts means the agent is never called but the run still reports "failed"');
+    assert.throws(() => AR.parseCommon(['--max-attempts', '0']), /must be >= 1/);
   });
   test('a negative --max-added-lines is rejected', () => {
-    const o = AR.parseCommon(['--max-added-lines', '-5']);
-    assert.ok(o.maxAddedLines >= 0, 'a negative guard limit rejects every possible diff');
+    assert.throws(() => AR.parseCommon(['--max-added-lines', '-5']), /must be >= 0/);
+  });
+  test('a non-numeric --max-files throws instead of disabling the guard', () => {
+    assert.throws(() => AR.parseCommon(['--max-files', 'all']), /expects a number/);
+  });
+  test('a fractional --max-attempts is rejected', () => {
+    assert.throws(() => AR.parseCommon(['--max-attempts', '2.5']), /whole number/);
+  });
+  test('--ids with no value throws a readable error, not a TypeError', () => {
+    assert.throws(() => AR.parseCommon(['--ids']), /--ids needs a value/);
+  });
+  test('--runs with a bad value throws (bench parses at module top level)', () => {
+    assert.throws(() => AR.parseCommon(['--runs', 'many']), /expects a number/);
   });
   test('an unknown flag is surfaced, not silently collected', () => {
     const o = AR.parseCommon(['--not-a-real-flag', 'x']);
     assert.equal(o._.includes('--not-a-real-flag'), true);
-    // Documents that typos are silently ignored rather than erroring.
+    // Documents that typos land in `_` rather than erroring.
   });
   test('an unknown agent backend is rejected before a run starts', () => {
-    const o = AR.parseCommon(['--agent-backend', 'typo-backend']);
-    assert.ok(['local', 'nemoclaw', 'openclaw'].includes(o.agentBackend),
-      'an unrecognised backend silently falls through to the "local" branch in agent.mjs');
+    assert.throws(() => AR.parseCommon(['--agent-backend', 'typo-backend']), /must be one of/,
+      'an unrecognised backend would silently fall through to the "local" branch in agent.mjs');
+  });
+  test('an unknown exec backend is rejected', () => {
+    assert.throws(() => AR.parseCommon(['--exec-backend', 'sandbox']), /must be one of/);
+  });
+  test('valid backends still parse', () => {
+    assert.equal(AR.parseCommon(['--agent-backend', 'nemoclaw']).agentBackend, 'nemoclaw');
+    assert.equal(AR.parseCommon(['--exec-backend', 'nemoclaw']).execBackend, 'nemoclaw');
   });
 });

@@ -84,6 +84,8 @@ STUB_STORE = textwrap.dedent('''
             if MODE == "patch_raises":
                 from pymongo.errors import OperationFailure
                 raise OperationFailure("write failed")
+            if MODE == "objectid_raises":
+                raise ValueError("scan_id must be a BSON ObjectId or a valid ObjectId string")
             return "PATCHID"
         def insert_audit_event(self, event_type, details, **kw):
             _log({"call": "insert_audit_event", "event_type": event_type, "details": details})
@@ -242,19 +244,57 @@ class BridgeCase(unittest.TestCase):
     def test_a_non_objectid_scan_id_is_reported_not_a_raw_traceback(self):
         """fix.mjs copies mongo_scan_id through verbatim; a non-ObjectId string reaches _as_object_id.
 
-        Uses the REAL store's validator (the stub does not validate), so this exercises the
-        actual exception type the bridge would face.
+        The real store validates with a plain ValueError, which is NOT a PyMongoError — so the
+        bridge must catch that class of error too, and report it as bad input (exit 1).
         """
         import importlib.util
         from pymongo.errors import PyMongoError
         spec = importlib.util.spec_from_file_location("real_mongo_store", REAL_STORE)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(ValueError):
             mod._as_object_id("not-an-objectid", "scan_id")
-        self.assertIsInstance(ctx.exception, PyMongoError,
-                              "the bridge only catches PyMongoError, so an invalid scan_id from "
-                              "fix.mjs's mongo_scan_id escapes as an uncaught ValueError traceback")
+        self.assertFalse(issubclass(ValueError, PyMongoError),
+                         "precondition: the store's validation error is not a PyMongoError")
+
+        # The bridge must survive it: stub insert_patch raises the same ValueError the real
+        # _as_object_id would, and the bridge must exit 1 with a readable message.
+        proc, _ = self.run_bridge(make_report(scan_id="not-an-objectid"), mode="objectid_raises")
+        self.assertNotIn("Traceback", proc.stderr,
+                         "an invalid scan_id must be reported clearly, not as an uncaught ValueError")
+        self.assertEqual(proc.returncode, 1, f"stdout={proc.stdout} stderr={proc.stderr}")
+        self.assertIn("cannot record", proc.stderr)
+
+    def test_record_failures_writes_no_patches_document(self):
+        """A failed fix was rolled back, so there is no patch: an audit event only."""
+        proc, calls = self.run_bridge(make_report(status="failed"), extra=["--record-failures"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("insert_patch", [c["call"] for c in calls],
+                         "a rolled-back fix must not be stored as a patches document with empty snippets")
+        self.assertIn("insert_audit_event", [c["call"] for c in calls])
+
+    def test_a_bad_mongodb_uri_exits_2_not_a_traceback(self):
+        """MongoClient resolves the URI during construction; that must still be the documented exit 2."""
+        proc, _ = self.run_bridge(make_report(), mode="ctor_raises")
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(proc.returncode, 2, f"stdout={proc.stdout} stderr={proc.stderr}")
+
+    def test_flag_before_the_positional_is_accepted(self):
+        """`--record-failures out/x/report.json` is an ordering argparse would accept."""
+        p = self.root / "r.json"
+        p.write_text(json.dumps(make_report()))
+        env = {**os.environ, "STUB_LOG": str(self.log), "STUB_MODE": "ok"}
+        proc = subprocess.run(
+            [sys.executable, str(BRIDGE), "--record-failures", str(p), "--repo-root", str(self.root)],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout} stderr={proc.stderr}")
+
+    def test_an_unknown_option_is_rejected(self):
+        proc, _ = self.run_bridge(make_report(), extra=["--not-a-flag"])
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("unknown option", proc.stderr)
 
     def test_docstring_scan_id_path_matches_the_code(self):
         """The module docstring documents where scan_id comes from; it must be accurate."""

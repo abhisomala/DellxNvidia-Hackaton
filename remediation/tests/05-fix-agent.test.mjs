@@ -12,7 +12,7 @@ import { writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync } from 'n
 import { join } from 'node:path';
 import { lib, SRC, opts, gitRepo, put, scratchDir, cleanupAll, REAL_DIFF } from './helpers.mjs';
 
-const { fixOne } = await import(`${SRC}/src/fix.mjs`);
+const { fixOne, extractSnippets, safeName } = await import(`${SRC}/src/fix.mjs`);
 const AG = await import(lib('agent.mjs'));
 after(cleanupAll);
 
@@ -121,6 +121,48 @@ describe('EDGE: fixOne retry loop', () => {
     assert.ok(r.attempts.every((a) => a.verify.reason === 'no-change'));
   });
 
+  test('an attempt that REVERTS its own edit does not wipe the earlier failure feedback', async () => {
+    // Edits persist between attempts, so the empty-diff branch is only reached when the agent
+    // undoes its own change. Attempt 1 edits and is rejected by the rescan; attempt 2 reverts,
+    // producing an empty diff; attempt 3 must still carry WHY attempt 1 was rejected.
+    const ORIGINAL = 'export default function UploadButton() {\n  return <button id="upload-submit" onClick={go} />;\n}\n';
+    const { root } = gitRepo({ files: { 'src/UploadButton.jsx': ORIGINAL } });
+    const bin = scratchDir('bin-');
+    const outDir = scratchDir('out-');
+    const counter = join(scratchDir('cnt-'), 'n');
+    const target = join(root, 'src/UploadButton.jsx');
+
+    const agentPath = join(bin, 'openclaw');
+    writeFileSync(agentPath, `#!/usr/bin/env node
+const fs = require('fs');
+const counter = ${JSON.stringify(counter)}, target = ${JSON.stringify(target)};
+const n = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
+fs.writeFileSync(counter, String(n));
+if (n === 1) fs.writeFileSync(target, ${JSON.stringify(ORIGINAL)}.replace('onClick={go}', 'data-x="1" onClick={go}'));
+else fs.writeFileSync(target, ${JSON.stringify(ORIGINAL)});   // attempt 2+: revert -> empty diff
+process.stdout.write(JSON.stringify({ ok: true, final: 'turn ' + n }) + '\\n');
+`);
+    chmodSync(agentPath, 0o755);
+
+    const stillFailing = JSON.stringify({
+      schema_version: '1.0', scan: {},
+      violations: [{ id: 'button-name#0', rule_id: 'button-name', selector: '#upload-submit', html: '<button id="upload-submit"></button>' }],
+    });
+    const scanPath = join(bin, 'scan.mjs');
+    writeFileSync(scanPath, `process.stdout.write(${JSON.stringify(stillFailing)});`);
+
+    const baseline = JSON.parse(stillFailing);
+    const o = opts({ appRoot: root, outDir, agentBackend: 'openclaw', agentBin: agentPath, scanCmd: `node ${JSON.stringify(scanPath)}`, buildCmd: '', funcCmd: '', turnTimeout: 20 });
+    const r = await fixOne({ ...o, maxAttempts: 3 }, VIOLATION, baseline);
+
+    assert.equal(r.attempts.length, 3);
+    assert.equal(r.attempts[1].verify.reason, 'no-change', 'attempt 2 reverted, so its diff is empty');
+    const p3 = readFileSync(join(outDir, 'button-name_0', 'prompt-3.md'), 'utf8');
+    assert.match(p3, /changed NO files on disk/, 'the no-op is reported');
+    assert.match(p3, /still reports rule button-name/,
+      'and the scanner rejection from attempt 1 survives the empty-diff turn');
+  });
+
   test('a crashing agent is recorded as a failed turn rather than aborting the run', async () => {
     const { o, baselineDoc } = scenario({ agentScript: 'process.stderr.write("boom"); process.exit(9);' });
     const r = await fixOne({ ...o, maxAttempts: 1 }, VIOLATION, baselineDoc);
@@ -189,8 +231,6 @@ describe('HARD: report and mongo_patch integrity', () => {
   });
 
   test('original_snippet/patched_snippet are not corrupted by diff metadata', () => {
-    // buildMongoPatch filters lines beginning with '-'/'+' and guards only '---'/'+++'.
-    // A diff whose CONTENT lines legitimately start with - or + must survive.
     const diff = [
       'diff --git a/a.css b/a.css',
       'index 111..222 100644',
@@ -202,18 +242,54 @@ describe('HARD: report and mongo_patch integrity', () => {
       '+  color: #000;',
       ' }',
     ].join('\n');
-    const original = diff.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).map((l) => l.slice(1)).join('\n');
-    const patched = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).map((l) => l.slice(1)).join('\n');
+    const { original, patched } = extractSnippets(diff, 'a.css');
     assert.equal(original, '  color: #111;');
     assert.equal(patched, '  color: #000;');
   });
 
-  test('a diff removing a markdown bullet line does not lose the "-" guard', () => {
-    // '--- something' inside file CONTENT is indistinguishable from a diff header.
-    const diff = ['--- a/notes.md', '+++ b/notes.md', '@@ -1 +1 @@', '--- a horizontal rule in the file', '+--- replaced rule'].join('\n');
-    const original = diff.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).map((l) => l.slice(1)).join('\n');
-    assert.notEqual(original, '',
-      'a removed content line that itself starts with "---" is silently dropped from original_snippet');
+  test('a removed content line starting with "---" is not mistaken for a diff header', () => {
+    const diff = [
+      'diff --git a/notes.md b/notes.md',
+      '--- a/notes.md',
+      '+++ b/notes.md',
+      '@@ -1 +1 @@',
+      '--- a horizontal rule in the file',
+      '+--- replaced rule',
+    ].join('\n');
+    const { original, patched } = extractSnippets(diff, 'notes.md');
+    assert.equal(original, '-- a horizontal rule in the file',
+      'the leading "-" is the diff marker; the rest is real content and must survive');
+    assert.equal(patched, '--- replaced rule');
+  });
+
+  test('snippets are per-file, not concatenated across every file in the diff', () => {
+    const diff = [
+      'diff --git a/src/Upload.jsx b/src/Upload.jsx',
+      '--- a/src/Upload.jsx',
+      '+++ b/src/Upload.jsx',
+      '@@ -1 +1 @@',
+      '-<button id="u"/>',
+      '+<button id="u" aria-label="Upload"/>',
+      'diff --git a/src/styles.css b/src/styles.css',
+      '--- a/src/styles.css',
+      '+++ b/src/styles.css',
+      '@@ -1 +1 @@',
+      '-.a { color: #777 }',
+      '+.a { color: #111 }',
+    ].join('\n');
+    const jsx = extractSnippets(diff, 'src/Upload.jsx');
+    assert.equal(jsx.original, '<button id="u"/>');
+    assert.doesNotMatch(jsx.original, /color/, 'the CSS file\'s lines must not leak into the JSX snippet');
+    assert.deepEqual(jsx.files, ['src/Upload.jsx', 'src/styles.css']);
+    const css = extractSnippets(diff, 'src/styles.css');
+    assert.equal(css.patched, '.a { color: #111 }');
+  });
+
+  test('a hunk header is never treated as content', () => {
+    const diff = ['diff --git a/a.js b/a.js', '--- a/a.js', '+++ b/a.js', '@@ -1,2 +1,2 @@ function ctx() {', '-const a = 1;', '+const a = 2;'].join('\n');
+    const { original, patched } = extractSnippets(diff, 'a.js');
+    assert.equal(original, 'const a = 1;');
+    assert.equal(patched, 'const a = 2;');
   });
 
   test('the summary printed to stdout omits the patch but the report file keeps it', async () => {
@@ -237,11 +313,22 @@ describe('HARD: report and mongo_patch integrity', () => {
       'concurrent runs of one violation write to the same out/<id>/ and clobber each other\'s report.json');
   });
 
-  test('safeName collapses distinct ids into the same directory', () => {
-    // Both '#a/b' and '#a_b' normalise to the same on-disk name.
-    const safe = (id) => String(id).replace(/[^A-Za-z0-9._-]+/g, '_');
-    assert.notEqual(safe('rule#a/b'), safe('rule#a_b'),
-      'distinct violation ids must map to distinct output directories');
+  test('safeName stays readable; colliding ids are separated by claimOutDir, not by the name', async () => {
+    assert.equal(safeName('button-name#0'), 'button-name_0', 'the common case stays readable');
+    assert.equal(safeName('rule#a/b'), safeName('rule#a_b'), 'the mapping is knowingly not injective');
+
+    // Two violations whose ids collapse to the same safe name must still get their own folders,
+    // and each report must record which violation it actually came from.
+    const outDir = scratchDir('collide-');
+    const mk = (id) => {
+      const s = scenario();
+      return fixOne({ ...s.o, outDir }, { ...VIOLATION, id }, s.baselineDoc);
+    };
+    const a = await mk('rule#a/b');
+    const b = await mk('rule#a_b');
+    assert.notEqual(a.out_dir, b.out_dir, 'colliding ids must not share an output directory');
+    assert.equal(JSON.parse(readFileSync(join(a.out_dir, 'report.json'), 'utf8')).violation_id, 'rule#a/b');
+    assert.equal(JSON.parse(readFileSync(join(b.out_dir, 'report.json'), 'utf8')).violation_id, 'rule#a_b');
   });
 });
 

@@ -54,13 +54,20 @@ describe('MAIN: the five documented input shapes normalize', () => {
     assert.equal(violation.selector, '#e');
   });
 
-  test('schema-1.0 document passes through unchanged (identity)', () => {
+  test('schema-1.0 document passes through with its content intact', () => {
     const doc = {
       schema_version: '1.0',
       scan: { tool: 't', app_url: 'u', timestamp: 'ts' },
       violations: [{ id: 'label#0', rule_id: 'label', selector: '#e', html: '', description: '', route: '/', impact: 'critical', source_tool: 'axe' }],
     };
-    assert.equal(N.normalizeScan(doc), doc, 'returns the very same object');
+    const before = JSON.stringify(doc);
+    const out = N.normalizeScan(doc);
+    assert.deepEqual(out.violations, doc.violations, 'violations survive verbatim');
+    assert.deepEqual(out.scan, doc.scan);
+    assert.equal(out.schema_version, '1.0');
+    assert.equal(JSON.stringify(doc), before, 'and the input is not mutated');
+    assert.notEqual(out.violations, doc.violations,
+      'a copy is returned so callers cannot mutate the caller\'s document through the result');
   });
 
   test("MongoDB scans document maps severity->impact and source_file->source", () => {
