@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Local accessibility remediation monitoring." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%237CE080' d='M6 4h20v24H6z'/%3E%3Cpath fill='%230B0D0C' d='M11 8h10v3H11zm0 6h10v3H11zm0 6h6v3h-6z'/%3E%3C/svg%3E" />
+    <title>GuardRail</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#app">Skip to main content</a>
+    <header class="topbar">
+      <button class="brand" type="button" data-home aria-label="Return to dashboard">
+        <span>GuardRail</span><small>an accessibility agent that catches problems before they ship.</small>
+      </button>
+      <div class="topbar-meta">
+        <span class="local-status"><i></i> local execution · 0 bytes external traffic</span>
+        <span class="watch-status" id="watch-status">Watcher starting…</span>
+        <dl><div><dt>sites monitored</dt><dd id="sites-total">—</dd></div><div><dt>fixes logged</dt><dd id="fixes-total">—</dd></div></dl>
+      </div>
+    </header>
+    <main id="app">
+      <div class="view-switch"><button type="button" class="nav-link current" data-home>Dashboard</button><span id="crumb" hidden> / <span></span></span></div>
+      <section id="dashboard-view" aria-live="polite">
+        <div class="intro"><div><h1>Operational overview</h1><p>Current scan activity and the latest state of every target under watch.</p></div><p class="refresh-note" id="refresh-note">Refreshing from the local store…</p></div>
+        <form class="scan-form" id="scan-form"><div><label for="scan-target">Demo-mode Scan Now</label><p>Accelerates continuous monitoring; it does not replace the watcher.</p></div><input id="scan-target" name="target" required value="demo/index.html" aria-describedby="scan-help" /><button type="submit">Scan Now</button><p class="scan-message" id="scan-help" aria-live="polite"></p></form>
+        <section class="activity" aria-labelledby="activity-title">
+          <div class="activity-head"><div><p class="eyebrow">Live activity</p><h2 id="activity-title">Awaiting a local scan</h2></div><p class="elapsed" id="activity-elapsed">Idle</p></div>
+          <ol class="pipeline" aria-label="Accessibility remediation pipeline"><li data-stage="scan">Scan</li><li data-stage="locate">Locate</li><li data-stage="patch">Patch</li><li data-stage="verify">Verify</li><li data-stage="record">Record</li></ol>
+          <p id="activity-copy">No recent scan event is in progress. GuardRail is standing by.</p>
+        </section>
+        <section class="registry-section" aria-labelledby="registry-title">
+          <div class="section-head"><h2 id="registry-title">Site registry</h2><p id="registry-count"></p></div>
+          <div class="table-wrap"><table><thead><tr><th scope="col">Target</th><th scope="col">Last scan</th><th scope="col">Violations</th><th scope="col">Status</th><th scope="col">Recent run</th></tr></thead><tbody id="registry-body"></tbody></table></div>
+          <div class="honest-state" id="registry-state" hidden></div>
+        </section>
+      </section>
+      <section id="detail-view" hidden aria-live="polite">
+        <div class="detail-header"><div><p class="eyebrow">Site detail</p><h1 id="detail-title"></h1><p id="detail-subtitle"></p></div><div class="detail-actions"><button type="button" class="quiet-button" data-home>Back to registry</button><a id="report-link" class="report-button" target="_blank" rel="noopener">Generate report</a></div></div>
+        <section class="findings" aria-labelledby="findings-title"><div class="section-head"><h2 id="findings-title">Current violations</h2><p id="findings-count"></p></div><div id="findings-list"></div></section>
+        <div class="detail-grid"><section class="trend" aria-labelledby="trend-title"><h2 id="trend-title">Historical trend</h2><div id="trend-chart"></div></section><section class="access-points" aria-labelledby="access-title"><h2 id="access-title">Access points scanned</h2><ul id="access-list"></ul></section></div>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
