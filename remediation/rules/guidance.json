@@ -1,0 +1,50 @@
+{
+  "button-name": {
+    "title": "Buttons must have discernible text",
+    "fix": "Give the button an accessible name that describes its action. For an icon-only button add aria-label=\"<verb + object>\" (for example \"Upload assignment\"), or add visually-hidden text inside the button. Keep the existing id, className, type and onClick exactly as they are. Mark decorative SVGs with aria-hidden=\"true\"."
+  },
+  "label": {
+    "title": "Form elements must have labels",
+    "fix": "Associate a visible <label> with the input: either <label htmlFor=\"<input id>\">Label text</label> placed before the input, or wrap the input in a <label> that also contains the label text. The label MUST contain visible text (an empty <label>, or one that only wraps the input with no text, does not count). If a nearby hint/span already shows the field name, turn that element into the label instead of adding a duplicate. Do not rely on placeholder alone. Keep the input's id, type, value, onChange and the form's onSubmit unchanged."
+  },
+  "keyboard-trap": {
+    "title": "No keyboard trap (WCAG 2.1.2)",
+    "fix": "Keep Tab/Shift+Tab cycling inside the open dialog (that part is correct for a modal), but add two exits, using the SAME mechanism the component already uses to close the dialog (for example the state setter that opens/closes it): (1) at the very top of the dialog's keydown handler add a branch for event.key === 'Escape' that closes the dialog and returns, placed BEFORE any early return that only handles Tab; (2) add a NEW visible <button type=\"button\" onClick={close}>Close</button> inside the dialog next to the existing buttons; it must have a working onClick that closes the dialog. When the dialog closes, move focus back to the element that opened it (remember the opener in a ref before opening, or focus it by id). Do NOT remove, rename, or replace any existing button or input (the Save button, its id and its submit behavior must stay exactly as they are). Keep every existing id and the role=\"dialog\" / aria-modal attributes."
+  },
+  "image-alt": {
+    "title": "Images must have alternate text",
+    "fix": "Add a meaningful alt attribute describing the image's purpose; use alt=\"\" only for purely decorative images."
+  },
+  "link-name": {
+    "title": "Links must have discernible text",
+    "fix": "Add link text or an aria-label describing the destination; keep href and handlers unchanged."
+  },
+  "color-contrast": {
+    "title": "Elements must meet minimum color contrast",
+    "fix": "Adjust the foreground or background color in the component's styles so the contrast ratio is at least 4.5:1 for normal text (3:1 for large text). Change colors only, not layout."
+  },
+  "html-has-lang": {
+    "title": "<html> element must have a lang attribute",
+    "fix": "Add lang=\"en\" (or the page language) to the <html> element in the HTML entry file."
+  },
+  "document-title": {
+    "title": "Documents must have <title>",
+    "fix": "Add a descriptive <title> in the HTML entry file's <head>."
+  },
+  "aria-required-attr": {
+    "title": "Required ARIA attributes must be provided",
+    "fix": "Add the ARIA attributes the role requires (see the failure summary), with correct values."
+  },
+  "aria-dialog-name": {
+    "title": "ARIA dialog and alertdialog nodes should have an accessible name",
+    "fix": "Add aria-labelledby pointing at the dialog heading's id, or aria-label with the dialog's purpose."
+  },
+  "select-name": {
+    "title": "Select element must have an accessible name",
+    "fix": "Associate a <label> with the select via htmlFor/id, or add aria-label. Keep id, value and onChange."
+  },
+  "keyboard-unreachable": {
+    "title": "All dialog controls must be reachable by keyboard (WCAG 2.1.1)",
+    "fix": "Fix the dialog's Tab handling so focus moves through EVERY focusable element inside it in DOM order and wraps at the ends (Tab from the last goes to the first, Shift+Tab from the first goes to the last), instead of always sending focus to one fixed element. Compute the list of focusable elements inside the dialog (a[href], button, input, select, textarea, [tabindex]) at keydown time, find the index of document.activeElement, and move to the next/previous one; call event.preventDefault() only when you move focus yourself. Keep the existing open/close behavior, the Escape handling, every id/class/data attribute and every existing handler unchanged."
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "a11y-scanner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Stand-in for Path 1: Playwright + axe-core scan plus a custom keyboard-trap check, emitting the agreed violations JSON.",
+  "dependencies": {
+    "axe-core": "^4.10.0",
+    "playwright": "1.56.0"
+  }
+}

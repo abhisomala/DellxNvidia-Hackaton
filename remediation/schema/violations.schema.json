@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a11yclaw/violations/1.0",
+  "title": "A11yClaw scan report (Path 1 -> Path 2 handoff)",
+  "type": "object",
+  "required": ["schema_version", "scan", "violations"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "scan": {
+      "type": "object",
+      "required": ["tool", "app_url", "timestamp"],
+      "properties": {
+        "tool": { "type": "string" },
+        "app_url": { "type": "string" },
+        "app_root": { "type": "string", "description": "absolute path of the app checkout the scan ran against (optional)" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "violations": { "type": "array", "items": { "$ref": "#/$defs/violation" } }
+  },
+  "$defs": {
+    "violation": {
+      "type": "object",
+      "required": ["id", "rule_id", "source_tool", "impact", "description", "route", "selector", "html"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+#[0-9]+$", "description": "rule_id#index, stable across repeated scans of the same page" },
+        "rule_id": { "type": "string", "description": "axe-core rule id, or a custom rule id such as keyboard-trap" },
+        "source_tool": { "enum": ["axe", "custom"] },
+        "impact": { "enum": ["minor", "moderate", "serious", "critical", "unknown"] },
+        "wcag": { "type": "array", "items": { "type": "string" }, "description": "axe tags starting with wcag (wcag2a, wcag412, ...)" },
+        "description": { "type": "string" },
+        "help": { "type": "string", "description": "axe failureSummary or the custom rule's remediation hint" },
+        "help_url": { "type": "string" },
+        "route": { "type": "string", "description": "page path where the element was found, e.g. /" },
+        "selector": { "type": "string", "description": "CSS selector for the failing element; rule_id + selector identify a violation" },
+        "html": { "type": "string", "description": "rendered outerHTML of the failing element (custom rules may truncate to the opening tag)" },
+        "source": {
+          "type": "object",
+          "description": "optional best-effort source location from Path 1; the fixer locates the file itself when absent",
+          "properties": { "file": { "type": "string" }, "line": { "type": "integer" } }
+        },
+        "repro": {
+          "type": "object",
+          "description": "custom rules only: how the failure was reproduced",
+          "properties": {
+            "open_selector": { "type": "string" },
+            "keys": { "type": "array", "items": { "type": "string" } },
+            "observed": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

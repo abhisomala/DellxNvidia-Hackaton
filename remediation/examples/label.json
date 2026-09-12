@@ -1,0 +1,13 @@
+{
+  "id": "label#0",
+  "rule_id": "label",
+  "source_tool": "axe",
+  "impact": "critical",
+  "wcag": ["wcag2a", "wcag412"],
+  "description": "Form elements must have labels",
+  "help": "Fix any of the following: Element does not have an implicit (wrapped) <label>; Element does not have an explicit <label>; aria-label attribute does not exist or is empty; aria-labelledby attribute does not exist, references elements that do not exist or references elements that are empty; Element has no title attribute; Element's default semantics were not overridden with role=\"none\" or role=\"presentation\"",
+  "help_url": "https://dequeuniversity.com/rules/axe/4.10/label",
+  "route": "/",
+  "selector": "#student-email",
+  "html": "<input id=\"student-email\" type=\"email\" placeholder=\"Email\" value=\"\">"
+}

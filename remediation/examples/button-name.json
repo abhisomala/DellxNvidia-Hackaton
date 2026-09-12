@@ -1,0 +1,13 @@
+{
+  "id": "button-name#0",
+  "rule_id": "button-name",
+  "source_tool": "axe",
+  "impact": "critical",
+  "wcag": ["wcag2a", "wcag412"],
+  "description": "Buttons must have discernible text",
+  "help": "Fix any of the following: Element does not have inner text that is visible to screen readers; aria-label attribute does not exist or is empty; aria-labelledby attribute does not exist, references elements that do not exist or references elements that are empty; Element has no title attribute; Element's default semantics were not overridden with role=\"none\" or role=\"presentation\"",
+  "help_url": "https://dequeuniversity.com/rules/axe/4.10/button-name",
+  "route": "/",
+  "selector": "#upload-submit",
+  "html": "<button id=\"upload-submit\" class=\"icon-btn\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 16V4m0 0l-4 4m4-4l4 4M4 20h16\"></path></svg></button>"
+}

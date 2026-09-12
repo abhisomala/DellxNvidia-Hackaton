@@ -1,0 +1,33 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen3:8b"
+      },
+      "workspace": "__WORKSPACE__"
+    }
+  },
+  "tools": {
+    "allow": [
+      "group:fs"
+    ],
+    "deny": [
+      "browser",
+      "canvas",
+      "cron",
+      "gateway",
+      "sessions_spawn",
+      "subagents",
+      "web_search",
+      "web_fetch",
+      "exec",
+      "process",
+      "image_generate",
+      "music_generate",
+      "video_generate"
+    ]
+  },
+  "skills": {
+    "allowBundled": []
+  }
+}
