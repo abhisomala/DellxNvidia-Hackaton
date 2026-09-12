@@ -119,6 +119,39 @@ class MongoStore:
         }
         return self.scans.insert_one(document).inserted_id
 
+    def insert_axe_scan(
+        self,
+        report: Mapping[str, Any],
+        *,
+        target_app: str | None = None,
+        source_file: str | None = None,
+        base_dir: str | None = None,
+        timestamp: datetime | None = None,
+    ) -> ObjectId:
+        """Insert a raw axe-core report from the accessibility scanner.
+
+        The scanner emits rule-grouped violations whose keys differ from
+        ``VIOLATION_CORE_FIELDS``; ``axe_adapter`` maps them onto the agreed
+        contract and fans each rule out into one entry per failing element.
+        Report-level provenance is kept under ``scanner_metadata``.
+        """
+        from .axe_adapter import (
+            scan_metadata_from_report,
+            target_app_from_report,
+            violations_from_axe_report,
+        )
+
+        violations = violations_from_axe_report(
+            report, source_file=source_file, base_dir=base_dir
+        )
+        document = {
+            "timestamp": timestamp or utc_now(),
+            "target_app": target_app or target_app_from_report(report, base_dir=base_dir),
+            "violations": _normalise_violations(violations),
+            "scanner_metadata": scan_metadata_from_report(report),
+        }
+        return self.scans.insert_one(document).inserted_id
+
     def get_scan(self, scan_id: ObjectId | str) -> dict[str, Any] | None:
         return self.scans.find_one({"_id": _as_object_id(scan_id, "scan_id")})
 
@@ -165,6 +198,32 @@ class MongoStore:
 
     def get_patch(self, patch_id: ObjectId | str) -> dict[str, Any] | None:
         return self.patches.find_one({"_id": _as_object_id(patch_id, "patch_id")})
+
+    def mark_patch_verified(
+        self,
+        patch_id: ObjectId | str,
+        *,
+        verified: bool = True,
+        verification_scan_id: ObjectId | str | None = None,
+    ) -> bool:
+        """Attach a verification outcome to an already-inserted patch.
+
+        ``insert_patch`` can set these at creation time, but a rescan-based
+        verification only has its result after the patch exists, so the
+        verification fields need to be settable afterwards.  Returns whether a
+        patch actually matched.
+        """
+        if not isinstance(verified, bool):
+            raise TypeError("verified must be a bool")
+        update: dict[str, Any] = {"verified": verified}
+        if verification_scan_id is not None:
+            update["verification_scan_id"] = _as_object_id(
+                verification_scan_id, "verification_scan_id"
+            )
+        result = self.patches.update_one(
+            {"_id": _as_object_id(patch_id, "patch_id")}, {"$set": update}
+        )
+        return result.matched_count == 1
 
     def find_patches(
         self, filters: Mapping[str, Any] | None = None, *, limit: int | None = None

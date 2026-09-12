@@ -1,1 +1,14 @@
+# Build / dependency trees — reinstall with `npm install`
+node_modules/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Generated run artifacts
 reports/
+pipeline/runs/
+audit-report/out/
+
+# Watcher heartbeat (pipeline/watcher.py)
+runtime/
