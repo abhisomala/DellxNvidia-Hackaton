@@ -1,2 +1,4 @@
 reports/
 runtime/
+__pycache__/
+*.pyc
