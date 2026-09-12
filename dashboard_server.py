@@ -423,7 +423,12 @@ def audit_stage(events: list[dict[str, Any]], scan_id: Any | None = None) -> dic
     stage_for_event = {"scan_run": "scan", "patch_applied": "patch", "verified": "verify"}
     details = latest.get("details", {}) if latest else {}
     stage = details.get("stage") or stage_for_event.get(event_type, "idle")
-    active = bool(latest and not details.get("complete") and is_recent(latest.get("timestamp")))
+    # A finished vision stage hands over to locate; "report" and "failed" end a run (runs
+    # recorded before the pipeline marked its last event complete end at "report" too).
+    if stage == "vision" and details.get("complete"):
+        stage = "locate"
+    finished = stage in ("report", "failed") or bool(details.get("complete") and stage != "locate")
+    active = bool(latest and not finished and is_recent(latest.get("timestamp")))
     return {
         "stage": stage if active else "idle",
         "active": active,
@@ -446,9 +451,14 @@ def dashboard_data() -> dict[str, Any]:
         scans = store.find_scans()
         patches = store.find_patches()
         events = store.find_audit_events(limit=100)
+        # A verification rescan checks a patched copy under pipeline/runs/; it is not a monitored site.
+        verification_ids = {identifier(p.get("verification_scan_id")) for p in patches if p.get("verification_scan_id")}
         newest_by_target: dict[str, dict[str, Any]] = {}
         for scan in scans:
             target = str(scan.get("target_app", "Unnamed target"))
+            # also catches a failed run's rescan, which no patch links to
+            if identifier(scan.get("_id")) in verification_ids or target.startswith("pipeline/runs/"):
+                continue
             newest_by_target.setdefault(target, scan)
 
         sites = []
@@ -492,13 +502,15 @@ def site_data(target_app: str) -> dict[str, Any] | None:
         patches = store.find_patches()
         events = store.find_audit_events(limit=300)
         latest = scans[0]
-        linked_patches = [
-            patch for patch in patches if identifier(patch.get("scan_id")) == identifier(latest.get("_id"))
-        ]
-        patches_by_finding = {
-            (str(patch.get("violation_rule_id", "")), str(patch.get("source_file", ""))): patch
-            for patch in linked_patches
-        }
+        # Match by rule over every scan of this target, newest patch first. Not by source file:
+        # the fix can live elsewhere (keyboard-unreachable is flagged on index.html, patched in
+        # script.js). Copy-mode runs leave the demo unpatched, so each run rescans the same
+        # violations and the verified patch usually belongs to an earlier scan.
+        target_scan_ids = {identifier(scan.get("_id")) for scan in scans}
+        patches_by_finding: dict[str, dict[str, Any]] = {}
+        for patch in sorted(patches, key=lambda p: str(p.get("applied_at") or ""), reverse=True):
+            if identifier(patch.get("scan_id")) in target_scan_ids:
+                patches_by_finding.setdefault(str(patch.get("violation_rule_id", "")), patch)
         gates_by_patch: dict[str, Any] = {}
         for event in events:  # newest first: keep the latest verified record per patch
             details = event.get("details", {})
@@ -513,9 +525,7 @@ def site_data(target_app: str) -> dict[str, Any] | None:
             is_vision = source == "vision"
             # Vision findings are recorded for review, never auto-patched: an axe patch
             # for the same file must not mark them verified.
-            patch = None if is_vision else patches_by_finding.get(
-                (str(violation.get("rule_id", "")), str(violation.get("source_file", "")))
-            )
+            patch = None if is_vision else patches_by_finding.get(str(violation.get("rule_id", "")))
             gate_record = gates_by_patch.get(identifier(patch.get("_id"))) if patch else None
             vision = violation.get("vision") if isinstance(violation.get("vision"), dict) else {}
             entry: dict[str, Any] = {

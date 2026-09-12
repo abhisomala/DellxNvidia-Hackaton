@@ -599,6 +599,7 @@ def _run_pipeline_once(
 
     environment = {**os.environ, "MONGODB_URI": os.environ.get("MONGODB_URI", "mongodb://localhost:27017")}
     store = MongoStore(server_selection_timeout_ms=3000)
+    scan_id = None
     try:
         store.ping()
         store.ensure_indexes()
@@ -674,6 +675,10 @@ def _run_pipeline_once(
                 raise StageError(f"the scan reported no {rule!r} violation to patch; rule_ids found: {found}")
             target_violation = matches[0]
         log("select", f"target {target_violation['rule_id']} @ {target_violation['selector']}")
+        record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                     stage="locate", scan_id=str(scan_id), rule_id=target_violation["rule_id"])
+        record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                     stage="patch", scan_id=str(scan_id), rule_id=target_violation["rule_id"])
 
         try:
             patch = build_patch(target_violation, repo_root=REPO_ROOT)
@@ -739,6 +744,8 @@ def _run_pipeline_once(
                              f"original backed up to {rel(backup)}; it is restored unless every gate passes")
 
             # --- 5. gates: all six, every time ---------------------------------
+            record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                         stage="verify", scan_id=str(scan_id), rule_id=patch["rule_id"])
             gates: dict[str, dict] = {}
             diff = patch["patch_diff"]
 
@@ -874,7 +881,7 @@ def _run_pipeline_once(
                 (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
                 record_stage(
                     store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
-                    stage="verify", scan_id=str(scan_id), verified=False, gate_results=statuses,
+                    stage="verify", scan_id=str(scan_id), verified=False, gate_results=statuses, complete=True,
                 )
                 raise StageError(
                     "NOT VERIFIED: gate(s) did not pass: "
@@ -883,6 +890,8 @@ def _run_pipeline_once(
                     + (f"; original {patch['source_file']} restored" if in_place else "")
                 )
 
+            record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                         stage="record", scan_id=str(scan_id), verified=verified)
             bridge = run_command(
                 [sys.executable, str(BRIDGE), str(report_path)],
                 timeout=BRIDGE_TIMEOUT_S, label="Path 2 bridge", env=environment,
@@ -951,9 +960,19 @@ def _run_pipeline_once(
 
         record_stage(
             store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
-            stage="report", scan_id=str(scan_id), patch_id=str(patch_id), verified=verified,
+            stage="report", scan_id=str(scan_id), patch_id=str(patch_id), verified=verified, complete=True,
         )
         return summary
+    except Exception as exc:
+        # Close the run on the dashboard: without a terminal event its last stage looks live.
+        # A failed verify already recorded its own terminal event.
+        if scan_id is not None and not str(exc).startswith("NOT VERIFIED"):
+            try:
+                record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                             stage="failed", scan_id=str(scan_id), error=str(exc)[:500], complete=True)
+            except Exception as record_exc:  # the store may be the thing that failed
+                log("record", f"could not record the failed run: {record_exc}")
+        raise
     finally:
         store.close()
 

@@ -80,8 +80,8 @@ async function loadDashboard() {
     if (!response.ok) throw new Error(data.error || "MongoDB could not be reached");
     $("#sites-total").textContent = data.summary.sitesMonitored;
     $("#fixes-total").textContent = data.summary.fixesLogged;
-    $("#refresh-note").textContent = data.isFallback ? "Local demo scan · MongoDB unavailable" : "Live read from MongoDB · refreshes every 15s";
-    drawActivity(data.activity); renderSites(data.sites);
+    $("#refresh-note").textContent = data.isFallback ? "Local demo scan · MongoDB unavailable" : (runActive ? "Live read from MongoDB · run in progress, refreshing every 2s" : "Live read from MongoDB · refreshes every 15s");
+    runActive = Boolean(data.activity.active); drawActivity(data.activity); renderSites(data.sites);
     if (data.isFallback) showRegistryState("Showing the most recent real local axe scan of demo/index.html. It is not a persisted MongoDB record.");
   } catch (error) {
     $("#refresh-note").textContent = "Local store unavailable";
@@ -401,12 +401,21 @@ async function loadSite(target, background = false) {
   }
 }
 async function openSite(target) {
-  clearInterval(refreshTimer); clearTimeout(detailTimer);
+  clearTimeout(refreshTimer); clearTimeout(detailTimer);
   if (detail.target !== target) Object.assign(detail, { target, data: null, json: "", filter: "all", expanded: new Set(), shotMode: null });
   $("#detail-view").hidden = false; $("#dashboard-view").hidden = true; $("#crumb").hidden = false; $("#crumb span").textContent = target;
   await loadSite(target);
 }
-function goHome() { clearTimeout(detailTimer); $("#detail-view").hidden = true; $("#dashboard-view").hidden = false; $("#crumb").hidden = true; clearInterval(refreshTimer); loadDashboard(); refreshTimer = setInterval(loadDashboard, 15000); }
+// Poll every 15s at rest, every 2s while a run is live (or was just queued) so each stage shows.
+let fastUntil = 0;
+let runActive = false;
+async function refreshDashboard() {
+  await loadDashboard();
+  if ($("#dashboard-view").hidden) return;
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refreshDashboard, runActive || Date.now() < fastUntil ? 2000 : 15000);
+}
+function goHome() { clearTimeout(detailTimer); $("#detail-view").hidden = true; $("#dashboard-view").hidden = false; $("#crumb").hidden = true; clearTimeout(refreshTimer); refreshDashboard(); }
 
 document.querySelectorAll("[data-home]").forEach((button) => button.addEventListener("click", goHome));
 document.querySelector(".findings .filter-chips").addEventListener("click", (event) => {
@@ -435,6 +444,6 @@ $("#visual-body").addEventListener("click", (event) => {
   const rec = event.target.closest('a[href^="#rec-"]');
   if (rec) { event.preventDefault(); const card = document.querySelector(rec.getAttribute("href")); if (card) { card.scrollIntoView({ block: "center" }); card.focus({ preventScroll: true }); } }
 });
-$("#scan-form").addEventListener("submit", async (event) => { event.preventDefault(); const button = event.currentTarget.querySelector("button"); const message = $("#scan-help"); button.disabled = true; message.textContent = "Queuing a real manual scan…"; try { const response = await fetch("/api/scan", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({target: $("#scan-target").value}) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Scan could not be queued"); message.textContent = "Manual scan queued. The continuous watcher remains active."; loadDashboard(); } catch (error) { message.textContent = error.message; } finally { button.disabled = false; } });
+$("#scan-form").addEventListener("submit", async (event) => { event.preventDefault(); const button = event.currentTarget.querySelector("button"); const message = $("#scan-help"); button.disabled = true; message.textContent = "Queuing a real manual scan…"; try { const response = await fetch("/api/scan", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({target: $("#scan-target").value}) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Scan could not be queued"); message.textContent = "Manual scan queued. The continuous watcher remains active."; fastUntil = Date.now() + 30000; refreshDashboard(); } catch (error) { message.textContent = error.message; } finally { button.disabled = false; } });
 goHome();
 loadHeartbeat(); setInterval(loadHeartbeat, 1000);
