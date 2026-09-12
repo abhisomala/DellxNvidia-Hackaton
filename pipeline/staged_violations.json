@@ -1,0 +1,32 @@
+{
+  "button-name": {
+    "rule_id": "button-name",
+    "selector": ".bag-button",
+    "severity": "critical",
+    "description": "Buttons must have discernible text",
+    "source_file": "demo/index.html",
+    "html": "<button class=\"bag-button\" type=\"button\" data-open-modal=\"\"></button>"
+  },
+  "label": {
+    "rule_id": "label",
+    "selector": "#customer-email",
+    "severity": "critical",
+    "description": "Form elements must have labels",
+    "source_file": "demo/index.html",
+    "html": "<input id=\"customer-email\" name=\"email\" type=\"email\" placeholder=\"Email address\" autocomplete=\"email\" required=\"\">",
+    "help": "Input has a placeholder but no associated <label> or aria-label; placeholder is not a label"
+  },
+  "keyboard-trap": {
+    "rule_id": "keyboard-trap",
+    "selector": "#hours-modal",
+    "severity": "serious",
+    "description": "Dialog traps keyboard focus: Tab and Shift+Tab always return focus to the close button, so other controls in the dialog (the Get directions link) cannot be reached",
+    "source_file": "demo/script.js",
+    "html": "<div class=\"modal-backdrop\" id=\"hours-modal\" hidden=\"\"><section class=\"modal\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Shop hours\"><button class=\"modal-close\" type=\"button\" data-close-modal=\"\">Close</button><p class=\"eyebrow\">Harbor &amp; Pine</p><h2>Shop hours</h2><p>Thursday–Sunday, 10am–5pm<br>Closed Monday–Wednesday</p><a class=\"button button-dark\" href=\"#visit\" data-close-modal=\"\">Get directions</a></section></div>",
+    "repro": {
+      "open_selector": ".text-button",
+      "keys": ["Tab", "Tab"],
+      "observed": "focus stays on .modal-close; the Get directions link is never focused"
+    }
+  }
+}
