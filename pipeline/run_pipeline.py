@@ -34,6 +34,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The dashboard and the watcher import this as ROOT; keep both names.
+ROOT = REPO_ROOT
 sys.path.insert(0, str(REPO_ROOT))
 
 from db.mongo_store import MongoStore  # noqa: E402
@@ -54,6 +56,29 @@ class StageError(RuntimeError):
 
 def log(stage: str, message: str) -> None:
     print(f"[{stage}] {message}", flush=True)
+
+
+def record_stage(
+    store: MongoStore,
+    *,
+    run_id: str,
+    target: str,
+    trigger_source: str,
+    stage: str,
+    **extra: object,
+) -> None:
+    """Log where the run got to, and whether a human or the watcher started it.
+
+    ``scan_run`` is the event type MongoStore accepts for pipeline progress;
+    the stage name is documented extra data rather than a new event type.
+    """
+    store.insert_audit_event("scan_run", {
+        "run_id": run_id,
+        "target_app": target,
+        "trigger_source": trigger_source,
+        "stage": stage,
+        **extra,
+    })
 
 
 def violation_key(entry: dict) -> tuple:
@@ -174,16 +199,25 @@ def run_integrity_check(target: Path, run_dir: Path) -> tuple[bool, str]:
     return process.returncode == 0, output
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", default=str(DEMO_DIR / "index.html"))
-    parser.add_argument("--skip-report", action="store_true", help="stop after recording")
-    args = parser.parse_args()
+def run_pipeline(
+    target: str | None = None,
+    trigger_source: str = "manual",
+    *,
+    skip_report: bool = False,
+) -> dict:
+    """Run scan -> insert -> patch -> verify -> record -> report once.
+
+    Returns the run summary.  Raises on any stage that did not produce what
+    the next one needs, so a caller (the dashboard, the watcher) reports a
+    failed run instead of an empty one.
+    """
+    target = target or str(DEMO_DIR / "index.html")
 
     started = datetime.now(timezone.utc)
     run_dir = RUNS_DIR / started.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
-    log("setup", f"run directory {run_dir.relative_to(REPO_ROOT)}")
+    run_id = run_dir.name
+    log("setup", f"run directory {run_dir.relative_to(REPO_ROOT)} (trigger_source={trigger_source})")
 
     store = MongoStore(server_selection_timeout_ms=3000)
     try:
@@ -192,12 +226,16 @@ def main() -> int:
         log("setup", f"connected to {store.database.name} on {store.client.address}")
 
         # --- 1. scan -------------------------------------------------------
-        baseline = run_scanner(Path(args.target), run_dir, "baseline")
+        baseline = run_scanner(Path(target), run_dir, "baseline")
 
         # --- 2. insert -----------------------------------------------------
         scan_id = store.insert_axe_scan(baseline)
         scan = store.get_scan(scan_id)
         log("insert", f"scans._id={scan_id} target_app={scan['target_app']} violations={len(scan['violations'])}")
+        record_stage(
+            store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+            stage="scan", scan_id=str(scan_id), violations=len(scan["violations"]),
+        )
         if not scan["violations"]:
             raise StageError("the scan found no violations, so there is nothing to patch")
 
@@ -342,7 +380,7 @@ def main() -> int:
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
         # --- 6. audit report from a real query -----------------------------
-        if not args.skip_report:
+        if not skip_report:
             if not REPORT_GENERATOR.exists():
                 raise StageError(f"missing report generator at {REPORT_GENERATOR}")
             generated = subprocess.run(
@@ -353,14 +391,29 @@ def main() -> int:
             if generated.returncode != 0:
                 raise StageError(f"report generation failed (exit {generated.returncode}): {generated.stderr.strip()[-800:]}")
 
-        print()
-        log("done", json.dumps(summary, indent=2))
-        return 0
+        record_stage(
+            store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+            stage="report", scan_id=str(scan_id), patch_id=str(patch_id), verified=verified,
+        )
+        return summary
+    finally:
+        store.close()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", default=str(DEMO_DIR / "index.html"))
+    parser.add_argument("--trigger-source", default="manual", help="recorded on the run's audit events")
+    parser.add_argument("--skip-report", action="store_true", help="stop after recording")
+    args = parser.parse_args()
+    try:
+        summary = run_pipeline(args.target, args.trigger_source, skip_report=args.skip_report)
     except Exception as exc:  # noqa: BLE001 - surface the stage that broke
         print(f"\nPIPELINE FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    finally:
-        store.close()
+    print()
+    log("done", json.dumps(summary, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
