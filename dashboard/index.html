@@ -27,7 +27,7 @@
         <form class="scan-form" id="scan-form"><div><label for="scan-target">Demo-mode Scan Now</label><p>Accelerates continuous monitoring; it does not replace the watcher.</p></div><input id="scan-target" name="target" required value="demo/index.html" aria-describedby="scan-help" /><button type="submit">Scan Now</button><p class="scan-message" id="scan-help" aria-live="polite"></p></form>
         <section class="activity" aria-labelledby="activity-title">
           <div class="activity-head"><div><p class="eyebrow">Live activity</p><h2 id="activity-title">Awaiting a local scan</h2></div><p class="elapsed" id="activity-elapsed">Idle</p></div>
-          <ol class="pipeline" aria-label="Accessibility remediation pipeline"><li data-stage="scan">Scan</li><li data-stage="locate">Locate</li><li data-stage="patch">Patch</li><li data-stage="verify">Verify</li><li data-stage="record">Record</li></ol>
+          <ol class="pipeline" aria-label="Accessibility remediation pipeline"><li data-stage="scan">Scan</li><li data-stage="vision">Vision</li><li data-stage="locate">Locate</li><li data-stage="patch">Patch</li><li data-stage="verify">Verify</li><li data-stage="record">Record</li></ol>
           <p id="activity-copy">No recent scan event is in progress. GuardRail is standing by.</p>
         </section>
         <section class="registry-section" aria-labelledby="registry-title">
@@ -38,7 +38,22 @@
       </section>
       <section id="detail-view" hidden aria-live="polite">
         <div class="detail-header"><div><p class="eyebrow">Site detail</p><h1 id="detail-title"></h1><p id="detail-subtitle"></p></div><div class="detail-actions"><button type="button" class="quiet-button" data-home>Back to registry</button><a id="report-link" class="report-button" target="_blank" rel="noopener">Generate report</a></div></div>
-        <section class="findings" aria-labelledby="findings-title"><div class="section-head"><h2 id="findings-title">Current violations</h2><p id="findings-count"></p></div><div id="findings-list"></div></section>
+        <section class="findings" aria-labelledby="findings-title">
+          <div class="section-head"><h2 id="findings-title">Current violations</h2><p id="findings-count" role="status"></p></div>
+          <div class="findings-toolbar">
+            <div class="filter-chips" role="group" aria-label="Filter findings by source">
+              <button type="button" class="chip" data-filter="all" aria-pressed="true">All <span data-count="all">0</span></button>
+              <button type="button" class="chip" data-filter="axe" aria-pressed="false">DOM (axe) <span data-count="axe">0</span></button>
+              <button type="button" class="chip" data-filter="vision" aria-pressed="false">Vision <span data-count="vision">0</span></button>
+            </div>
+            <p class="findings-legend"><span class="source-badge axe">axe</span> deterministic DOM rule · <span class="source-badge vision">vision</span> model judgement from screenshots, recorded for review, never auto-patched</p>
+          </div>
+          <div id="findings-list"></div>
+        </section>
+        <section class="visual-review" id="visual-review" aria-labelledby="visual-title">
+          <div class="section-head"><h2 id="visual-title">Visual review · <span id="visual-model">gemma4:26b</span></h2><p id="visual-meta"></p></div>
+          <div id="visual-body"></div>
+        </section>
         <div class="detail-grid"><section class="trend" aria-labelledby="trend-title"><h2 id="trend-title">Historical trend</h2><div id="trend-chart"></div></section><section class="access-points" aria-labelledby="access-title"><h2 id="access-title">Access points scanned</h2><ul id="access-list"></ul></section></div>
       </section>
     </main>

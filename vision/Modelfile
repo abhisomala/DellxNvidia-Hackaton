@@ -1,0 +1,17 @@
+# GuardRail vision judge: Gemma 4 26B MoE (~3.8B active) with vision, tools and thinking.
+# Build with `bash vision/setup.sh`; the pipeline calls it as `guardrail-vision`.
+FROM gemma4:26b
+
+# Pinned explicitly rather than inherited. 32768 is 4x the largest vision call measured
+# (8.3K tokens: 8 images + facts + thinking + answer). It also equals this server's
+# OLLAMA_CONTEXT_LENGTH, so guardrail-vision and plain gemma4:26b (patching, reviewer)
+# share ONE loaded runner. With different values Ollama needs two runners of the same
+# 18 GB weights and will not evict an idle one: a gemma4:26b call waited behind an idle
+# 262144-context guardrail-vision runner until it timed out (measured 2026-09-12).
+# pipeline/vision_judge.py still unloads a mismatched runner before and after vision work.
+PARAMETER num_ctx 32768
+
+# Google's recommended Gemma 4 sampling. The pipeline also sends these per request.
+PARAMETER temperature 1.0
+PARAMETER top_p 0.95
+PARAMETER top_k 64

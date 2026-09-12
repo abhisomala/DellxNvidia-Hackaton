@@ -112,6 +112,10 @@ def violations_from_axe_report(
                     "failure_summary": node.get("failureSummary"),
                     "failed_checks": checks,
                     "scanner": "axe-core",
+                    # Deterministic DOM findings (axe-core and the axe-shaped keyboard
+                    # probe); vision findings carry source "vision" and a model confidence.
+                    "source": "axe",
+                    "confidence": 1.0,
                 }
             )
     return entries

@@ -1,6 +1,6 @@
 # Demo day runbook
 
-The chain is **scan → insert → patch → verify → record → audit report**, driven by
+The chain is **scan → insert → vision → patch → verify → record → audit report**, driven by
 one command. This file is the startup sequence, the restore path, and an honest
 statement of what is real and what is not.
 
@@ -60,6 +60,22 @@ python3 -m db.live_roundtrip      # prints LIVE ROUND-TRIP PASSED, exit 0
 > generator will not pick them (§4) — but it is why the collections grow if you
 > run it repeatedly.
 
+### b2. Vision model (once per machine) and cache warm-up
+
+```bash
+bash vision/setup.sh      # confirms gemma4:26b has vision+tools+thinking, builds guardrail-vision
+```
+
+`guardrail-vision` is `FROM gemma4:26b` with `num_ctx 32768` pinned in
+`vision/Modelfile` (4x the largest vision call, and equal to this server's
+`OLLAMA_CONTEXT_LENGTH`, so it shares one loaded runner with patching and the reviewer) and Gemma 4's recommended sampling (temperature 1.0, top_p 0.95,
+top_k 64). A cold vision audit makes 5 thinking calls and takes **about 4–5 minutes**
+on the GB10. Judgements are cached by the exact request (screenshots + facts +
+prompt version + model), so **run the pipeline once before filming**: every later
+run over unchanged pixels reuses the judgement in seconds, and the log, the
+dashboard and the report say it was reused. `--fresh` on
+`pipeline/vision_audit.py`, or deleting `runtime/vision-cache/`, forces a new one.
+
 ### c. Run the pipeline
 
 ```bash
@@ -68,7 +84,7 @@ MONGODB_URI='mongodb://localhost:27017' MONGODB_DATABASE='scanner' \
   python3 pipeline/run_pipeline.py
 ```
 
-Exit 0 means every stage passed **and all five gates passed**. It prints the
+Exit 0 means every stage passed **and all six gates passed**. It prints the
 `scan_id`, `patch_id`, `verification_scan_id`, a gate table and the verdict, and
 writes the report to `audit-report/out/audit-report.html`. Per-run artifacts —
 the merged baseline/verify scans (`axe-*.json`) and the keyboard probe's own
@@ -82,6 +98,7 @@ Useful flags:
 python3 pipeline/run_pipeline.py --rule button-name            # CASE 1: the empty bag button
 python3 pipeline/run_pipeline.py --rule keyboard-unreachable   # CASE 2: the shop-hours dialog
 python3 pipeline/run_pipeline.py --rule button-name --in-place # patch the REAL demo file
+python3 pipeline/run_pipeline.py --no-vision                   # skip the vision audit (visual gate not-applicable)
 ```
 
 `--in-place` backs the real file up to `pipeline/runs/<timestamp>/original-<name>`,
@@ -114,6 +131,8 @@ template env live in `deploy/`.
 node scripts/a11y-scan.js                        # Path 1 only (exit 1 = violations found)
 node scripts/keyboard-scan.js demo/index.html    # keyboard probe: real Tab/Escape presses in dialogs
 node integrity-check/check.js                    # 13 behaviour checks on the demo app
+python3 pipeline/vision_audit.py demo/index.html  # vision audit only (runs axe first for dedupe; --fresh skips the cache)
+node scripts/vision-capture.js demo/index.html --out /tmp/cap   # just the screenshots/facts the model sees
 python3 audit-report/generate_report.py          # regenerate from the newest real scan
 python3 audit-report/generate_report.py --scan-id <id>
 ```
@@ -167,6 +186,23 @@ cover both databases (`scanner` and the unrelated `scan_patch_db`).
 - the findings — `button-name` on `.bag-button` (axe, impact `critical`) and
   `keyboard-unreachable` on `#hours-modal` (the probe, WCAG 2.1.1: Tab never
   reaches *Get directions*; axe cannot see this)
+- the vision audit — `scripts/vision-capture.js` screenshots the page in Chromium at
+  1280px and 320px (1280px at 400% zoom), presses Tab through every control and
+  screenshots each one focused and unfocused, and asks axe which contrast checks it
+  could *not* decide; `pipeline/vision_audit.py` sends crops to `guardrail-vision`
+  (gemma4:26b) through Ollama `/api/chat` with a JSON schema in `format` and thinking on.
+  On the demo page it finds what axe cannot: invisible focus on 6 controls, the
+  navigation vanishing at 320px, the *Seasonal pick* badge on a gradient, and the
+  colour-only stock dots, plus a design review (scores, strengths, CSS suggestions)
+- the vision findings' confidence — the model's own estimate combined with
+  deterministic evidence: a focus finding where not one pixel changed is backed by the
+  pixel diff; the badge's contrast is also *measured* (the same clip is captured with the
+  text made transparent, and the text colour is blended over the real background pixels).
+  A finding on an element axe or the probe already flagged for the same kind of rule is
+  dropped (`deduplicated` in the report). Findings under 0.5 confidence are kept only in
+  `suppressed`. Vision findings carry `source: "vision"`; DOM findings `source: "axe"`
+  (the keyboard probe's too) with confidence 1.0. They are recorded for review, **not
+  auto-patched**
 - every database record, written through `db/mongo_store.py`
 - the patch *recording* — done by Path 2's own `remediation/bridge/record_to_mongo.py`,
   invoked directly now that Path 2's harness lives in this repository
@@ -178,7 +214,7 @@ Patches come from the local Ollama model `gemma4:26b` via
 Path 2's `locate.mjs` picks the file: `demo/index.html` for `button-name`,
 `demo/script.js` (the dialog's keydown handler) for `keyboard-unreachable`.
 
-**The five gates — all run on every patch, none asserted:**
+**The six gates — all run on every patch, none asserted:**
 
 | gate | what really runs | passes when |
 |---|---|---|
@@ -187,16 +223,19 @@ Path 2's `locate.mjs` picks the file: `demo/index.html` for `button-name`,
 | `rescan` | axe-core **and** the keyboard probe over the patched page | the target violation is gone and no violation appears that was not in the baseline |
 | `functional` | `integrity-check/check.js` over the patched page, with `--require-dialog-keyboard` for `keyboard-*` rules | exit 0 |
 | `reviewer` | Path 2's model reviewer via `pipeline/gates_cli.mjs judge` against `gemma4:26b` on the local Ollama (`GUARDRAIL_JUDGE_URL`, `GUARDRAIL_JUDGE_MODEL`) | the reviewer ran and said `pass` |
+| `visual` | the patched page is captured again and compared with the baseline capture, region by region and focus stop by focus stop. Pixel-identical → no model call. Changed regions are cropped to the change and re-checked by `guardrail-vision` with thinking **off** (seconds) | nothing changed, or the model saw no visual regression; new horizontal overflow, controls lost at 320px or a lost Tab stop fail on their own. `not-applicable` only with `--no-vision` |
 
 Each gate is recorded as `passed`, `failed`, `unavailable` (it could not run — a
 timeout, the model offline, a harness crash) or `not-applicable`. `unavailable`
 is never a pass: with Ollama down the reviewer is `unavailable` and the run is
 `NOT VERIFIED`. Every subprocess and model call has a timeout, so an offline
 machine fails clearly instead of hanging. `verified` needs diff-size, rescan,
-functional and reviewer `passed` and build's syntax check ok. Only then is the
+functional, reviewer and visual `passed` and build's syntax check ok. A vision
+audit that could not run is recorded on the scan as `vision_audit.status:
+"unavailable"` and logged in capitals — never as "no visual issues". Only then is the
 patch recorded; the `verified` audit event's `details.gates` lists the gates that
 passed, `details.gate_results` holds every gate's status, and
-`details.gates_not_applicable` is `["build"]`.
+`details.gates_not_applicable` is `["build"]` (plus `"visual"` with `--no-vision`).
 
 **By default the demo app is never modified.** The patch is applied to a copy under
 `pipeline/runs/<timestamp>/verify/demo/`, so the planted violations stay in

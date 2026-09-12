@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GuardRail pipeline: scan -> insert -> patch -> apply -> five gates -> record -> report.
+"""GuardRail pipeline: scan -> insert -> vision -> patch -> apply -> six gates -> record -> report.
 
 Stages
 ------
@@ -9,6 +9,13 @@ Stages
                presses in Chromium, for what axe cannot see).  The probe's
                report is axe-shaped, so both are merged into one report.
 2. **insert**  that merged report as one ``scans`` document via ``db.mongo_store``
+2b. **vision** ``pipeline.vision_audit``: gemma4:26b judges screenshots of the page
+               for visual-only WCAG failures (contrast over imagery, invisible focus,
+               clipping, colour-only meaning, target size, 320px reflow) and reviews
+               its visual design.  Findings are appended to the scan with
+               ``source: "vision"`` and a confidence; nothing axe or the probe
+               already flagged is repeated.  Vision findings are recorded for review,
+               not auto-patched.  Disable with ``--no-vision`` / ``GUARDRAIL_VISION=0``.
 3. **patch**   a patch from the local Ollama model (gemma4:26b) via
                ``pipeline.patch_llm``; ``locate.mjs`` picks the file (the script,
                not the page, for keyboard rules).  Prompt and raw model response
@@ -16,7 +23,7 @@ Stages
 4. **apply**   by default to a copy of the app under the run directory; with
                ``--in-place`` to the REAL file, backed up first and restored
                unless every gate passes.
-5. **gates**   all five run every time, each recorded as
+5. **gates**   all six run every time, each recorded as
                passed | failed | unavailable | not-applicable:
 
                - ``diff-size``  Path 2's ``guardDiff`` via ``pipeline/gates_cli.mjs``
@@ -32,9 +39,13 @@ Stages
                - ``reviewer``   Path 2's model reviewer via ``gates_cli.mjs judge``;
                  mandatory, so an unreachable reviewer is ``unavailable``, never
                  a pass
+               - ``visual``     the patched page is captured again and compared with
+                 the baseline capture: pixel-identical regions and focus stops pass
+                 with no model call; changed ones are re-checked by the vision model
+                 (thinking off).  ``not-applicable`` only when vision was disabled.
 
-               ``verified`` only when diff-size, rescan, functional and reviewer
-               passed and the syntax check behind build passed.
+               ``verified`` only when diff-size, rescan, functional, reviewer and
+               visual passed and the syntax check behind build passed.
 6. **record**  a verified patch through Path 2's own bridge, with the audit
                event's gate list corrected to what really ran
 7. **report**  regenerates the audit report from a real query
@@ -64,6 +75,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from db.mongo_store import MongoStore  # noqa: E402
 from pipeline.patch_llm import PatchGenerationError, build_patch  # noqa: E402
 from pipeline.patch_validate import validate  # noqa: E402
+from pipeline import vision_audit  # noqa: E402
+from db.axe_adapter import source_file_from_url  # noqa: E402
 
 SCANNER = REPO_ROOT / "scripts" / "a11y-scan.js"
 SCANNER_OUTPUT = REPO_ROOT / "reports" / "a11y-report.json"
@@ -87,8 +100,12 @@ REVIEWER_TIMEOUT_S = 240
 BRIDGE_TIMEOUT_S = 60
 REPORT_TIMEOUT_S = 120
 
-GATE_NAMES = ("diff-size", "build", "rescan", "functional", "reviewer")
+GATE_NAMES = ("diff-size", "build", "rescan", "functional", "reviewer", "visual")
 GUARD_LIMITS = {"max_added_lines": 80, "max_removed_lines": 40, "max_files": 2}
+
+
+def vision_enabled_by_default() -> bool:
+    return os.environ.get("GUARDRAIL_VISION", "1") != "0"
 
 
 class StageError(RuntimeError):
@@ -458,10 +475,46 @@ def gate_reviewer(violation: dict, diff: str, run_dir: Path) -> dict:
     }
 
 
+def gate_visual(verify_page: Path, run_dir: Path, vision_ran: bool) -> dict:
+    """Capture the patched page and compare it with the baseline capture."""
+    if not vision_ran:
+        return {"status": "not-applicable", "disabled_by_operator": True,
+                "reason": "vision was disabled for this run (--no-vision / GUARDRAIL_VISION=0)"}
+    baseline_dir, verify_dir = run_dir / "vision", run_dir / "vision-verify"
+    if not (baseline_dir / "capture.json").exists():
+        return {"status": "unavailable", "error": "the baseline vision capture did not run, so there is nothing to compare"}
+    try:
+        vision_audit.run_capture(verify_page, verify_dir)
+        return vision_audit.regression_check(baseline_dir, verify_dir, verify_dir)
+    except vision_audit.VisionCaptureError as exc:
+        return {"status": "unavailable", "error": f"patched page capture failed: {exc}"}
+    except Exception as exc:  # noqa: BLE001 - a gate that did not run is not a pass
+        return {"status": "unavailable", "error": f"visual gate crashed: {type(exc).__name__}: {exc}"}
+
+
+def run_vision_stage(target: Path, run_dir: Path) -> dict:
+    """The vision audit; never raises.  Returns the report, or an unavailable stub."""
+    try:
+        return vision_audit.audit_page(
+            target, run_dir / "vision", known_report=run_dir / "axe-baseline.json",
+            source_file=source_file_from_url(expected_file_url(target)),
+        )
+    except vision_audit.VisionCaptureError as exc:
+        error = f"vision capture failed: {exc}"
+    except Exception as exc:  # noqa: BLE001 - reported as unavailable, never as "no visual issues"
+        error = f"vision stage crashed: {type(exc).__name__}: {exc}"
+    return {"status": "unavailable", "error": error, "violations": [], "findings": [],
+            "artifacts_dir": rel(run_dir / "vision")}
+
+
 def gate_satisfied(name: str, record: dict) -> bool:
     if name == "build":
         return record["status"] == "passed" or (
             record["status"] == "not-applicable" and record.get("syntax_ok") is True
+        )
+    if name == "visual":
+        return record["status"] == "passed" or (
+            record["status"] == "not-applicable" and record.get("disabled_by_operator") is True
         )
     return record["status"] == "passed"
 
@@ -479,6 +532,11 @@ def gate_detail(name: str, record: dict) -> str:
         return record.get("summary") or f"exit {record.get('exit_code')}"
     if name == "reviewer":
         return f"{record.get('reviewer_status')} in {record.get('ms')}ms; reasons={record.get('reasons') or 'none'}"
+    if name == "visual":
+        if record["status"] == "not-applicable":
+            return record.get("reason", "")
+        return (f"{record.get('changed')}/{record.get('compared')} changed; model re-check "
+                f"{'ran' if record.get('model_called') else 'not needed'}; {record.get('reason', '')}")[:160]
     return ""
 
 
@@ -492,6 +550,7 @@ def run_pipeline(
     skip_report: bool = False,
     rule: str | None = None,
     in_place: bool = False,
+    vision: bool | None = None,
 ) -> dict:
     """Run the pipeline once, one run at a time.
 
@@ -509,7 +568,7 @@ def run_pipeline(
             log("setup", "another pipeline run is in progress; waiting for it to finish")
             fcntl.flock(lock, fcntl.LOCK_EX)
         return _run_pipeline_once(
-            target, trigger_source, skip_report=skip_report, rule=rule, in_place=in_place
+            target, trigger_source, skip_report=skip_report, rule=rule, in_place=in_place, vision=vision
         )
 
 
@@ -520,8 +579,9 @@ def _run_pipeline_once(
     skip_report: bool = False,
     rule: str | None = None,
     in_place: bool = False,
+    vision: bool | None = None,
 ) -> dict:
-    """Run scan -> insert -> patch -> apply -> gates -> record -> report once.
+    """Run scan -> insert -> vision -> patch -> apply -> gates -> record -> report once.
 
     Returns the run summary.  Raises on any stage that did not produce what
     the next one needs, and when any gate did not pass, so a caller (the
@@ -529,12 +589,13 @@ def _run_pipeline_once(
     """
     target = target or str(DEMO_DIR / "index.html")
     target_path = Path(target)
+    vision = vision_enabled_by_default() if vision is None else vision
 
     started = datetime.now(timezone.utc)
     run_dir = RUNS_DIR / started.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     run_id = run_dir.name
-    log("setup", f"run directory {rel(run_dir)} (trigger_source={trigger_source}, in_place={in_place})")
+    log("setup", f"run directory {rel(run_dir)} (trigger_source={trigger_source}, in_place={in_place}, vision={vision})")
 
     environment = {**os.environ, "MONGODB_URI": os.environ.get("MONGODB_URI", "mongodb://localhost:27017")}
     store = MongoStore(server_selection_timeout_ms=3000)
@@ -547,22 +608,69 @@ def _run_pipeline_once(
         baseline = scan_target(target_path, run_dir, "baseline")
 
         # --- 2. insert -----------------------------------------------------
-        scan_id = store.insert_axe_scan(baseline)
+        vision_state = {"status": "running", "started_at": datetime.now(timezone.utc).isoformat()} if vision else {
+            "status": "disabled", "reason": "--no-vision / GUARDRAIL_VISION=0"}
+        scan_id = store.insert_axe_scan(baseline, extra_fields={"vision_audit": vision_state})
         scan = store.get_scan(scan_id)
         log("insert", f"scans._id={scan_id} target_app={scan['target_app']} violations={len(scan['violations'])}")
         record_stage(
             store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
             stage="scan", scan_id=str(scan_id), violations=len(scan["violations"]),
         )
-        if not scan["violations"]:
-            raise StageError("the scan found no violations, so there is nothing to patch")
+
+        # --- 2b. vision ------------------------------------------------------
+        vision_report: dict = {"status": "disabled"}
+        if vision:
+            record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                         stage="vision", scan_id=str(scan_id))
+            try:
+                vision_report = run_vision_stage(target_path, run_dir)
+            finally:
+                if vision_report.get("status") == "disabled":  # interrupted before any result existed
+                    store.attach_vision_audit(scan_id, [], {**vision_state, "status": "unavailable",
+                                                            "error": "the run stopped during the vision audit"})
+            summary_doc = (vision_audit.scan_summary(vision_report) if "tasks" in vision_report
+                           else {k: vision_report.get(k) for k in ("status", "error", "artifacts_dir")})
+            store.attach_vision_audit(scan_id, vision_report.get("violations") or [], summary_doc)
+            scan = store.get_scan(scan_id)
+            findings = vision_report.get("findings") or []
+            cache = vision_report.get("cache") or {}
+            if vision_report["status"] == "unavailable":
+                log("vision", f"!!! VISION AUDIT UNAVAILABLE - visual checks did NOT run: {vision_report.get('error')}")
+            else:
+                log("vision", f"status={vision_report['status']} findings={len(findings)} "
+                              f"latency={vision_report.get('latency_s')}s cache={cache.get('hits')}/{cache.get('calls')} "
+                              f"deduplicated={len(vision_report.get('deduplicated') or [])} "
+                              f"-> appended to scans._id={scan_id} with source=vision")
+                for finding in findings:
+                    log("vision", f"  vision-{finding['category']} {finding['selector']} "
+                                  f"confidence={finding['confidence']} ({finding['method']}): {finding['title']}")
+            record_stage(store, run_id=run_id, target=scan["target_app"], trigger_source=trigger_source,
+                         stage="vision", scan_id=str(scan_id), vision_status=vision_report["status"],
+                         vision_findings=len(findings), complete=True)
+            try:
+                released = vision_audit.judge.release()
+                if released:
+                    log("vision", f"released {', '.join(released)} so the gemma4:26b patch and reviewer calls load "
+                                  "without waiting behind it")
+            except vision_audit.judge.VisionModelError as exc:
+                log("vision", f"could not release the vision runner (patching may wait for it): {exc}")
+
+        dom_violations = [v for v in scan["violations"] if v.get("source") != "vision"]
+        if not dom_violations:
+            raise StageError(
+                "the DOM scan found no violations, so there is nothing to patch"
+                + (f" ({len(scan['violations'])} vision finding(s) are recorded for review)" if scan["violations"] else "")
+            )
 
         # --- 3. select + patch ----------------------------------------------
-        target_violation = scan["violations"][0]
+        target_violation = dom_violations[0]
         if rule:
-            matches = [v for v in scan["violations"] if v.get("rule_id") == rule]
+            if rule.startswith("vision-"):
+                raise StageError(f"{rule!r} is a vision finding: those are recorded for review, not auto-patched")
+            matches = [v for v in dom_violations if v.get("rule_id") == rule]
             if not matches:
-                found = sorted({str(v.get("rule_id")) for v in scan["violations"]})
+                found = sorted({str(v.get("rule_id")) for v in dom_violations})
                 raise StageError(f"the scan reported no {rule!r} violation to patch; rule_ids found: {found}")
             target_violation = matches[0]
         log("select", f"target {target_violation['rule_id']} @ {target_violation['selector']}")
@@ -630,7 +738,7 @@ def _run_pipeline_once(
                 log("apply", f"IN-PLACE: wrote the patch to the REAL file {rel(real_file)}; "
                              f"original backed up to {rel(backup)}; it is restored unless every gate passes")
 
-            # --- 5. gates: all five, every time --------------------------------
+            # --- 5. gates: all six, every time ---------------------------------
             gates: dict[str, dict] = {}
             diff = patch["patch_diff"]
 
@@ -670,6 +778,18 @@ def _run_pipeline_once(
                                  f"ms={g['ms']} reasons={g['reasons'] or 'none'}"
                                  + (f" error={g['error']}" if g.get("error") else "") + f" -> {g['status']}")
 
+            gates["visual"] = gate_visual(verify_page, run_dir, vision)
+            g = gates["visual"]
+            if g["status"] == "not-applicable":
+                log("gate:visual", f"{g['reason']} -> not-applicable")
+            elif g.get("compared") is None:
+                log("gate:visual", f"did not run: {g.get('error')} -> {g['status']}")
+            else:
+                log("gate:visual", f"compared {g['compared']} regions/focus stops with the baseline capture: "
+                                   f"{g['changed']} changed, measured regressions={g['measured_regressions'] or 'none'}, "
+                                   f"model re-check {'ran (thinking off)' if g['model_called'] else 'not needed'}"
+                                   + (f", error={g['error']}" if g.get("error") else "") + f" -> {g['status']}")
+
             statuses = {name: gates[name]["status"] for name in GATE_NAMES}
             failed_gates = [name for name in GATE_NAMES if not gate_satisfied(name, gates[name])]
             verified = not failed_gates
@@ -678,7 +798,7 @@ def _run_pipeline_once(
             log("gates", f"{'gate':<11} {'status':<15} detail")
             for name in GATE_NAMES:
                 log("gates", f"{name:<11} {statuses[name]:<15} {gate_detail(name, gates[name])}")
-            log("gates", f"VERIFIED={verified} (all five gates ran; decided by their results, not asserted)")
+            log("gates", f"VERIFIED={verified} (all six gates ran; decided by their results, not asserted)")
 
             verification_scan_id = None
             if after is not None:
@@ -742,6 +862,9 @@ def _run_pipeline_once(
                 "patch_is_simulated": False,
                 "model_used": patch["model_used"],
                 "model_latency_s": patch["latency_s"],
+                "vision_status": vision_report.get("status"),
+                "vision_findings": len(vision_report.get("findings") or []),
+                "vision_cache": vision_report.get("cache"),
             }
 
             if not verified:
@@ -780,17 +903,21 @@ def _run_pipeline_once(
             # Path 2's bridge hardcodes its own five gate names onto the `verified`
             # event; replace them with what this run's gates actually reported.
             gates_passed = [name for name in GATE_NAMES if statuses[name] == "passed"]
+            not_applicable = [name for name in GATE_NAMES if statuses[name] == "not-applicable"]
             corrected = store.audit_log.update_many(
                 {"event_type": "verified", "details.patch_id": str(patch_id)},
                 {
                     "$set": {
                         "details.gates": gates_passed,
                         "details.gate_results": statuses,
-                        "details.gates_not_applicable": ["build"],
+                        "details.gates_not_applicable": not_applicable,
                         "details.gates_note": (
-                            "All five gates ran in GuardRail's pipeline. build has no step for this "
+                            "All six gates ran in GuardRail's pipeline. build has no step for this "
                             "static HTML/JS site, so it is not applicable; the patched file's syntax "
-                            "check ran in its place and passed"
+                            "check ran in its place and passed. visual compares screenshots of the "
+                            "patched page with the baseline capture"
+                            + ("; vision was disabled for this run, so visual is not applicable"
+                               if "visual" in not_applicable else "")
                         ),
                     }
                 },
@@ -841,10 +968,15 @@ def main() -> int:
         "--in-place", action="store_true",
         help="apply the patch to the REAL file (backed up; restored unless every gate passes)",
     )
+    parser.add_argument(
+        "--no-vision", action="store_true",
+        help="skip the gemma4 vision audit (the visual gate is then not-applicable); also GUARDRAIL_VISION=0",
+    )
     args = parser.parse_args()
     try:
         summary = run_pipeline(
             args.target, args.trigger_source, skip_report=args.skip_report, rule=args.rule, in_place=args.in_place,
+            vision=False if args.no_vision else None,
         )
     except Exception as exc:  # noqa: BLE001 - surface the stage that broke
         print(f"\nPIPELINE FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)

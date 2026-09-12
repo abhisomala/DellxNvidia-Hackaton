@@ -127,6 +127,8 @@ class MongoStore:
         source_file: str | None = None,
         base_dir: str | None = None,
         timestamp: datetime | None = None,
+        extra_violations: Sequence[Mapping[str, Any]] = (),
+        extra_fields: Mapping[str, Any] | None = None,
     ) -> ObjectId:
         """Insert a raw axe-core report from the accessibility scanner.
 
@@ -134,6 +136,10 @@ class MongoStore:
         ``VIOLATION_CORE_FIELDS``; ``axe_adapter`` maps them onto the agreed
         contract and fans each rule out into one entry per failing element.
         Report-level provenance is kept under ``scanner_metadata``.
+
+        ``extra_violations`` are already in the scans shape (the vision audit's
+        findings) and are appended after the DOM findings; ``extra_fields`` are
+        stored alongside (``vision_audit``) and may not replace a core field.
         """
         from .axe_adapter import (
             scan_metadata_from_report,
@@ -147,10 +153,33 @@ class MongoStore:
         document = {
             "timestamp": timestamp or utc_now(),
             "target_app": target_app or target_app_from_report(report, base_dir=base_dir),
-            "violations": _normalise_violations(violations),
+            "violations": _normalise_violations([*violations, *extra_violations]),
             "scanner_metadata": scan_metadata_from_report(report),
         }
+        clashes = sorted(set(extra_fields or {}) & set(document))
+        if clashes:
+            raise ValueError(f"extra_fields may not replace core scan fields: {', '.join(clashes)}")
+        document.update(extra_fields or {})
         return self.scans.insert_one(document).inserted_id
+
+    def attach_vision_audit(
+        self,
+        scan_id: ObjectId | str,
+        violations: Sequence[Mapping[str, Any]],
+        summary: Mapping[str, Any],
+    ) -> bool:
+        """Append a finished vision audit's findings and summary to an inserted scan.
+
+        The scan is inserted as soon as the DOM scan is done (``vision_audit.status``
+        "running"), so the dashboard can show the audit in progress; this records
+        its outcome.  Returns whether the scan matched.
+        """
+        update: dict[str, Any] = {"$set": {"vision_audit": dict(summary)}}
+        entries = _normalise_violations(violations)
+        if entries:
+            update["$push"] = {"violations": {"$each": entries}}
+        result = self.scans.update_one({"_id": _as_object_id(scan_id, "scan_id")}, update)
+        return result.matched_count == 1
 
     def get_scan(self, scan_id: ObjectId | str) -> dict[str, Any] | None:
         return self.scans.find_one({"_id": _as_object_id(scan_id, "scan_id")})

@@ -14,6 +14,7 @@ html { scroll-behavior: smooth; }
 body { margin: 0; color: var(--ink); background: var(--mist); font-family: "Bricolage Grotesque", "Avenir Next", Avenir, sans-serif; font-optical-sizing: auto; }
 a { color: inherit; text-underline-offset: 4px; }
 button, input, select { font: inherit; }
+nav a:focus, .section-heading a:focus, .button:focus { outline: none; }
 
 .site-header { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 6vw; border-bottom: 1px solid rgba(21, 36, 58, .16); }
 .brand { font-size: 1.22rem; font-weight: 750; letter-spacing: -.07em; text-decoration: none; white-space: nowrap; }
@@ -53,6 +54,10 @@ h2 { font-size: clamp(2.15rem, 3.7vw, 3.55rem); font-weight: 620; letter-spacing
 .product-card p { margin-bottom: 6px; color: var(--bay); font-size: .78rem; font-weight: 670; letter-spacing: -.01em; }
 .product-card h3 { margin-bottom: 8px; font-size: 1.25rem; font-weight: 620; letter-spacing: -.045em; }
 .product-card span { color: rgba(21, 36, 58, .7); font-size: .85rem; font-weight: 600; }
+.product-card { position: relative; }
+.badge { position: absolute; top: 16px; left: 16px; color: rgba(233, 240, 242, .62); font-size: .68rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.stock-dot { display: inline-block; width: 9px; height: 9px; margin-left: 10px; border-radius: 50%; vertical-align: middle; }
+.is-in { background: #3f9d4b; }.is-out { background: #c8363d; }
 
 .visit { display: grid; grid-template-columns: 1.1fr .9fr; gap: 40px; padding: 85px 10vw; border-top: 1px solid rgba(21, 36, 58, .16); border-bottom: 1px solid rgba(21, 36, 58, .16); }
 .visit h2 { max-width: 510px; margin-bottom: 0; }

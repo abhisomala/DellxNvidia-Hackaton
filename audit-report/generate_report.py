@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import sys
@@ -32,6 +33,203 @@ SEVERITY_ORDER = {"critical": 0, "serious": 1, "moderate": 2, "minor": 3}
 
 # db/live_roundtrip.py writes connectivity-test records under this label.
 SYNTHETIC_TARGET_APP = "roundtrip-smoke-test"
+
+
+GATE_ORDER = ("diff-size", "build", "rescan", "functional", "reviewer", "visual")
+VIEWPORT_LABEL = {"desktop": "1280px desktop", "reflow-320": "320px reflow"}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def finding_source(violation: dict) -> str:
+    """Scans stored before the vision stage carry no ``source``: those are DOM (axe) findings."""
+    return "vision" if violation.get("source") == "vision" else "axe"
+
+
+def artifact_data_uri(artifacts_dir, name) -> tuple[str | None, str]:
+    """(data URI, shown path) for one vision artifact PNG, or (None, path) when it is missing.
+
+    ``artifacts_dir`` is repo-relative by contract; only PNG files inside it are embedded.
+    """
+    if not artifacts_dir or not name:
+        return None, str(name or "")
+    base = Path(str(artifacts_dir))
+    base = base if base.is_absolute() else REPO_ROOT / base
+    shown = f"{artifacts_dir}/{name}"
+    try:
+        root = base.resolve(strict=True)
+        path = (root / str(name)).resolve(strict=True)
+        if not path.is_relative_to(root) or path.suffix.lower() != ".png":
+            return None, shown
+        data = path.read_bytes()
+    except (OSError, RuntimeError, ValueError):
+        return None, shown
+    if not data.startswith(PNG_SIGNATURE):
+        return None, shown
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii"), shown
+
+
+def render_vision_section(scan: dict, esc) -> str:
+    """The "Visual review" section: status, scores, annotated screenshots, findings, design notes."""
+    audit = scan.get("vision_audit")
+    title = "<h2>Visual review (gemma4:26b vision)</h2>"
+    if not isinstance(audit, dict):
+        return f'{title}\n  <p class="note">The vision audit did not run for this scan (no <code>vision_audit</code> is recorded), so only DOM findings are reported.</p>'
+    status = audit.get("status") or "unknown"
+    if status == "running":
+        return (f'{title}\n  <p class="note">The vision audit was still running when this report was generated '
+                f'(started {esc(audit.get("started_at"))}); its findings are not included.</p>')
+    if status == "disabled":
+        reason = audit.get("reason") or audit.get("error")
+        return (f'{title}\n  <p class="note">The vision audit was turned off for this run'
+                f'{f" (<code>{esc(reason)}</code>)" if reason else ""}; no visual checks ran.</p>')
+    if status == "unavailable":
+        return (f'{title}\n  <div class="banner banner-warn"><strong>The vision audit could not run for this scan.</strong> '
+                f'{esc(audit.get("error"))}. Visual checks did not run.</div>')
+
+    artifacts_dir = audit.get("artifacts_dir")
+    model = audit.get("model") or {}
+    tasks = [t for t in audit.get("tasks") or [] if isinstance(t, dict)]
+    cache = audit.get("cache") or {}
+    counts = audit.get("counts") or {}
+    review = audit.get("design_review") if isinstance(audit.get("design_review"), dict) else None
+    annotated = audit.get("annotated") or {}
+    vision = [v for v in scan.get("violations", []) if finding_source(v) == "vision"]
+
+    def image(name, alt, css="shot") -> str:
+        uri, shown = artifact_data_uri(artifacts_dir, name)
+        if uri is None:
+            return f'<p class="missing">Image <code>{esc(shown)}</code> is missing on this machine, so it is not embedded.</p>' if name else ""
+        return f'<img class="{css}" src="{uri}" alt="{esc(alt)}" />'
+
+    think = [bool(t.get("think")) for t in tasks]
+    thinking = "on" if think and all(think) else "partial" if any(think) else "off"
+    facts = [
+        f"status <b>{esc(status)}</b>",
+        f"model <b>{esc(model.get('model'))}</b> ({esc(model.get('base_model'))}, "
+        f"{esc(model.get('parameter_size'))} {esc(model.get('quantization'))}, num_ctx {esc(model.get('num_ctx'))})",
+        f"thinking <b>{thinking}</b>",
+        f"latency <b>{esc(audit.get('latency_s'))} s</b>",
+        f"<b>{len(tasks)}</b> model call(s), {sum(1 for t in tasks if t.get('status') != 'ok')} failed",
+    ]
+    if cache.get("all_cached"):
+        cached_at = sorted(str(t.get("cached_at")) for t in tasks if t.get("cached_at"))
+        when = cached_at[0] if cached_at else "an earlier run"
+        cache_line = (f'<div class="banner banner-warn"><strong>Judgement reused from {esc(when)}:</strong> page pixels '
+                      "unchanged, so the model's earlier judgement was reused and no new model call was made.</div>")
+        facts.append("cache <b>all calls reused</b>")
+    else:
+        cache_line = ""
+        facts.append(f"cache {'on' if cache.get('enabled') else 'off'}: "
+                     f"<b>{esc(cache.get('hits') or 0)} of {esc(cache.get('calls') or len(tasks))}</b> calls reused")
+    partial = (f'<div class="banner banner-warn"><strong>Partial result.</strong> {esc(audit.get("error"))}. '
+               "Findings below come only from the model calls that finished.</div>") if status == "partial" else ""
+
+    scores_html = ""
+    summary_html = ""
+    rec_rows = ""
+    if review:
+        scores = review.get("scores") or {}
+        scores_html = '<div class="cards">' + "".join(
+            f'<div class="card"><b>{esc(scores.get(key))}<small>/10</small></b><span>{label}</span></div>'
+            for key, label in (("overall", "overall design"), ("typography", "typography"), ("color", "color"),
+                               ("spacing", "spacing"), ("hierarchy", "hierarchy"))
+        ) + '</div>\n  <p class="note">Design scores are the model\'s judgement with an accessibility lens (1-10), not a WCAG pass/fail result.</p>'
+        strengths = "".join(f"<li>{esc(s)}</li>" for s in review.get("strengths") or [])
+        summary_html = (f"<h3>Design summary</h3>\n  <p>{esc(review.get('summary'))}</p>"
+                        + (f"\n  <h3>Strengths</h3>\n  <ul>{strengths}</ul>" if strengths else ""))
+        rec_rows = "\n".join(
+            f"""      <tr>
+        <td>{esc(item.get('number') or index)}</td>
+        <td>{esc(item.get('area'))}</td>
+        <td class="nowrap"><span class="prio prio-{esc(item.get('priority'))}">{esc(item.get('priority'))}</span></td>
+        <td>{esc(item.get('issue'))}</td>
+        <td>{esc(item.get('recommendation'))}</td>
+        <td><code>{esc(item.get('css_suggestion'))}</code></td>
+        <td>{esc(item.get('accessibility_benefit'))}</td>
+        <td><code>{esc(item.get('selector'))}</code></td>
+      </tr>"""
+            for index, item in enumerate(review.get("improvements") or [], start=1)
+            if isinstance(item, dict)
+        )
+
+    finding_rows = "\n".join(
+        f"""      <tr>
+        <td>{esc((v.get('vision') or {}).get('number') or number)}</td>
+        <td class="nowrap"><span class="sev sev-{esc(v.get('severity'))}">{esc(v.get('severity'))}</span></td>
+        <td class="nowrap"><code>{esc(v.get('rule_id'))}</code><br /><small>{esc(VIEWPORT_LABEL.get((v.get('vision') or {}).get('viewport'), (v.get('vision') or {}).get('viewport')))}</small></td>
+        <td class="nowrap">{confidence_text(v)}<br /><small>{esc((v.get('vision') or {}).get('method'))}</small></td>
+        <td><strong>{esc(v.get('description'))}</strong><br />{esc(v.get('failure_summary'))}
+            <br /><em>Recommendation:</em> {esc(v.get('help'))}
+            {f'<br /><a href="{esc(v.get("help_url"))}">{esc(v.get("help_url"))}</a>' if v.get('help_url') else ''}</td>
+        <td>{image((v.get('vision') or {}).get('evidence_image'), f"Evidence crop for {v.get('description')} ({v.get('selector')})", 'crop')}</td>
+      </tr>"""
+        for number, v in enumerate(vision, start=1)
+    )
+
+    dropped = [("deduplicated", d) for d in audit.get("deduplicated") or [] if isinstance(d, dict)] + [
+        ("suppressed", s) for s in audit.get("suppressed") or [] if isinstance(s, dict)]
+    dropped_html = "".join(
+        f"<li>{kind}: {esc(d.get('category'))} <code>{esc(d.get('selector'))}</code> - {esc(d.get('reason'))}</li>"
+        for kind, d in dropped
+    )
+    task_rows = "\n".join(
+        f"""      <tr><td>{esc(t.get('name'))}</td><td>{esc(t.get('images'))}</td><td>{'on' if t.get('think') else 'off'}</td>
+        <td>{esc((t.get('stats') or {}).get('latency_s'))}</td><td>{esc((t.get('stats') or {}).get('output_tokens'))}</td>
+        <td>{esc(t.get('status'))}{f" (reused from {esc(t.get('cached_at'))})" if t.get('cached') else ''}{f": {esc(t.get('error'))}" if t.get('error') else ''}</td></tr>"""
+        for t in tasks
+    )
+    by_viewport = {}
+    for v in vision:
+        key = (v.get("vision") or {}).get("viewport")
+        by_viewport[key] = by_viewport.get(key, 0) + 1
+
+    return f"""{title}
+  {partial}{cache_line}
+  <p class="facts">{' &middot; '.join(facts)}</p>
+  {scores_html}
+  {summary_html}
+
+  <h3>Annotated screenshot: vision findings at 1280px desktop ({by_viewport.get('desktop', 0)})</h3>
+  <p class="note">Numbers on the screenshot match the # column of the vision findings table below.</p>
+  <figure>{image(annotated.get('desktop'), 'Annotated 1280px desktop screenshot with numbered vision findings') or '<p class="missing">No annotated desktop screenshot was recorded.</p>'}</figure>
+  <details><summary>Annotated 320px reflow screenshot ({by_viewport.get('reflow-320', 0)} finding(s))</summary>
+  <figure class="narrow">{image(annotated.get('reflow-320'), 'Annotated 320px-wide reflow screenshot with numbered vision findings') or '<p class="missing">No annotated reflow screenshot was recorded.</p>'}</figure></details>
+
+  <h3>Vision findings ({len(vision)})</h3>
+  <div class="wrap"><table>
+    <thead><tr><th>#</th><th>Severity</th><th>Rule / viewport</th><th>Confidence / method</th><th>Finding, evidence and recommendation</th><th>Evidence crop</th></tr></thead>
+    <tbody>
+{finding_rows or '      <tr><td colspan="6">none</td></tr>'}
+    </tbody>
+  </table></div>
+  <p class="note">{esc(counts.get('deduplicated', 0))} deduplicated against DOM findings &middot; {esc(counts.get('suppressed', 0))} suppressed (low confidence or judged by another pass). Vision findings are recorded for human review and are not auto-patched.</p>
+  {f'<ul class="note">{dropped_html}</ul>' if dropped_html else ''}
+
+  <h3>Design recommendations</h3>
+  <figure>{image(annotated.get('design'), 'Desktop screenshot annotated with numbered design recommendations') if review else ''}</figure>
+  <div class="wrap"><table>
+    <thead><tr><th>#</th><th>Area</th><th>Priority</th><th>Issue</th><th>Recommendation</th><th>CSS suggestion</th><th>Accessibility benefit</th><th>Selector</th></tr></thead>
+    <tbody>
+{rec_rows or '      <tr><td colspan="8">no design review recorded</td></tr>'}
+    </tbody>
+  </table></div>
+
+  <details><summary>Model calls ({len(tasks)})</summary>
+  <div class="wrap"><table>
+    <thead><tr><th>Call</th><th>Images</th><th>Thinking</th><th>Latency (s)</th><th>Output tokens</th><th>Result</th></tr></thead>
+    <tbody>
+{task_rows or '      <tr><td colspan="6">none</td></tr>'}
+    </tbody>
+  </table></div></details>"""
+
+
+def confidence_text(violation: dict) -> str:
+    confidence = violation.get("confidence")
+    if finding_source(violation) != "vision":
+        return "deterministic"
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        return f"{round(confidence * 100)}%"
+    return "unknown"
 
 
 def jsonable(value):
@@ -153,22 +351,40 @@ def render_html(data: dict, database: str) -> str:
 
     rows = "\n".join(
         f"""      <tr>
-        <td><span class="sev sev-{esc(v.get('severity'))}">{esc(v.get('severity'))}</span></td>
+        <td class="nowrap"><span class="sev sev-{esc(v.get('severity'))}">{esc(v.get('severity'))}</span></td>
+        <td class="nowrap"><span class="src src-{finding_source(v)}">{'vision' if finding_source(v) == 'vision' else 'axe'}</span></td>
         <td><code>{esc(v.get('rule_id'))}</code></td>
         <td><code>{esc(v.get('selector'))}</code></td>
         <td>{esc(v.get('source_file'))}</td>
+        <td class="nowrap">{confidence_text(v)}</td>
         <td>{esc(v.get('description'))}</td>
       </tr>"""
         for v in violations
     )
+    vision_count = sum(1 for v in scan["violations"] if finding_source(v) == "vision")
+    dom_count = len(scan["violations"]) - vision_count
+
+    gates_by_patch = {}
+    for event in events:
+        details = event.get("details", {})
+        if event.get("event_type") == "verified" and details.get("patch_id") and isinstance(details.get("gate_results"), dict):
+            gates_by_patch.setdefault(str(details["patch_id"]), details["gate_results"])
+
+    def gates_text(patch) -> str:
+        results = gates_by_patch.get(str(patch.get("_id")))
+        if not results:
+            return "-"
+        names = [n for n in GATE_ORDER if n in results] + sorted(set(results) - set(GATE_ORDER))
+        return "<br />".join(f"{esc(n)}: {esc(results[n])}" for n in names)
 
     patch_rows = "\n".join(
         f"""      <tr>
-        <td><code>{esc(p.get('violation_rule_id'))}</code></td>
+        <td class="nowrap"><code>{esc(p.get('violation_rule_id'))}</code></td>
         <td>{esc(p.get('source_file'))}</td>
         <td><code>{esc(p.get('original_snippet'))}</code></td>
         <td><code>{esc(p.get('patched_snippet'))}</code></td>
-        <td>{'verified' if p.get('verified') else 'not verified'}</td>
+        <td class="nowrap">{'verified' if p.get('verified') else 'not verified'}</td>
+        <td class="nowrap"><small>{gates_text(p)}</small></td>
         <td>{esc(p.get('verification_scan_id'))}</td>
         <td>{esc(p.get('model_used'))}</td>
       </tr>"""
@@ -177,8 +393,8 @@ def render_html(data: dict, database: str) -> str:
 
     event_rows = "\n".join(
         f"""      <tr>
-        <td>{esc(e.get('event_type'))}</td>
-        <td>{esc(e.get('timestamp'))}</td>
+        <td class="nowrap">{esc(e.get('event_type'))}</td>
+        <td class="nowrap">{esc(e.get('timestamp'))}</td>
         <td><code>{esc(json.dumps(jsonable(e.get('details', {}))))}</code></td>
       </tr>"""
         for e in events
@@ -250,6 +466,24 @@ def render_html(data: dict, database: str) -> str:
   .sev-moderate {{ background:#fdf6b2; color:#7d6608; }}
   .sev-minor {{ background:#e1effe; color:#1e429f; }}
   .wrap {{ overflow-x:auto; }}
+  .wrap table {{ min-width:720px; }}
+  th {{ word-break:normal; white-space:nowrap; }}
+  td.nowrap {{ word-break:normal; white-space:nowrap; }}
+  h3 {{ font-size:15px; margin:22px 0 8px; }}
+  .note {{ color:var(--muted); font-size:13.5px; }}
+  .facts {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 14px; font-size:13.5px; }}
+  .card small {{ font-size:13px; color:var(--muted); font-weight:400; }}
+  .src {{ padding:2px 7px; border-radius:4px; font-size:12px; font-weight:600; border:1px solid var(--line); background:#fff; }}
+  .src-vision {{ background:#eef0ff; border-color:#c7cdfa; color:#3730a3; }}
+  .prio {{ font-size:12px; font-weight:600; }}
+  .prio-high {{ color:#9c4221; }}
+  figure {{ margin:10px 0; }}
+  figure img.shot {{ display:block; max-width:min(100%, 820px); height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; }}
+  figure.narrow img.shot {{ max-width:320px; }}
+  img.crop {{ display:block; max-width:200px; height:auto; border:1px solid var(--line); border-radius:4px; }}
+  .missing {{ color:#9c4221; font-size:13px; }}
+  details {{ margin:12px 0; }}
+  summary {{ cursor:pointer; font-weight:600; font-size:14px; }}
   footer {{ color:var(--muted); font-size:12.5px; margin-top:28px; }}
 </style>
 </head>
@@ -261,7 +495,7 @@ def render_html(data: dict, database: str) -> str:
   {banner}
 
   <div class="cards">
-    <div class="card"><b>{len(scan['violations'])}</b><span>failing elements</span></div>
+    <div class="card"><b>{len(scan['violations'])}</b><span>findings ({dom_count} DOM &middot; {vision_count} vision)</span></div>
     <div class="card"><b>{len(patches)}</b><span>patches recorded</span></div>
     <div class="card"><b>{sum(1 for p in patches if p.get('verified'))}</b><span>verified</span></div>
     <div class="card"><b>{len(events)}</b><span>audit events</span></div>
@@ -270,21 +504,23 @@ def render_html(data: dict, database: str) -> str:
 
   <h2>Violations found by the scanner</h2>
   <div class="wrap"><table>
-    <thead><tr><th>Severity</th><th>Rule</th><th>Selector</th><th>Source file</th><th>Description</th></tr></thead>
+    <thead><tr><th>Severity</th><th>Source</th><th>Rule</th><th>Selector</th><th>Source file</th><th>Confidence</th><th>Description</th></tr></thead>
     <tbody>
-{rows or '      <tr><td colspan="5">none</td></tr>'}
+{rows or '      <tr><td colspan="7">none</td></tr>'}
     </tbody>
   </table></div>
 
   <h2>Patches</h2>
   <div class="wrap"><table>
     <thead><tr><th>Rule</th><th>Source file</th><th>Before</th><th>After</th><th>State</th>
-               <th>Verification scan</th><th>Model</th></tr></thead>
+               <th>Gates</th><th>Verification scan</th><th>Model</th></tr></thead>
     <tbody>
-{patch_rows or '      <tr><td colspan="7">none</td></tr>'}
+{patch_rows or '      <tr><td colspan="8">none</td></tr>'}
     </tbody>
   </table></div>
   {verification_note}
+
+  {render_vision_section(scan, esc)}
 
   <h2>Audit log</h2>
   <div class="wrap"><table>
