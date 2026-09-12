@@ -118,6 +118,52 @@ python3 audit-report/generate_report.py          # regenerate from the newest re
 python3 audit-report/generate_report.py --scan-id <id>
 ```
 
+### f. Optional: patches through NemoClaw/OpenShell
+
+Off by default. With `GUARDRAIL_PATCH_BACKEND=nemoclaw` the patch prompt goes to the
+OpenClaw agent inside a NemoClaw sandbox (OpenShell: deny-by-default egress, logged
+turns) instead of straight to Ollama. OpenShell routes the agent's inference to the
+same host Ollama `gemma4:26b`, so the model does not change. Everything after the
+model call (splice, validate, five gates, Mongo, report) is identical; `model_used`
+reads `nemoclaw:guardrail/ollama:gemma4:26b`. Code: `pipeline/patch_nemoclaw.py`.
+
+One-time host setup (sudo):
+
+```bash
+sudo usermod -aG docker dell                  # then log out and back in
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\nEnvironment="OLLAMA_CONTEXT_LENGTH=32768"\n' \
+  | sudo tee /etc/systemd/system/ollama.service.d/nemoclaw.conf
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+```
+
+`0.0.0.0` lets the sandbox reach Ollama (via `host.openshell.internal`); it also
+exposes port 11434 on the LAN, so firewall it if that matters.
+
+Install NemoClaw + OpenShell and onboard a sandbox on Ollama (not vLLM, not Nemotron):
+
+```bash
+curl -fsSL https://www.nvidia.com/nemoclaw.sh | NEMOCLAW_AGENT=openclaw NEMOCLAW_SANDBOX_NAME=guardrail \
+  NEMOCLAW_PROVIDER=ollama NEMOCLAW_MODEL=gemma4:26b NEMOCLAW_NON_INTERACTIVE=1 \
+  NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 bash
+bash scripts/nemoclaw-check.sh                # status, doctor, policy, one agent turn
+```
+
+Run with it:
+
+```bash
+GUARDRAIL_PATCH_BACKEND=nemoclaw python3 pipeline/patch_llm.py --rule button-name
+GUARDRAIL_PATCH_BACKEND=nemoclaw python3 -m pipeline.run_pipeline --rule button-name
+python3 pipeline/tests/nemoclaw_backend.py    # fake-CLI checks; add --real for one sandbox turn
+```
+
+For the dashboard, set the variables in `~/.config/guardrail.env` (see
+`deploy/guardrail.env.example`), add the `nemoclaw` directory to the unit's PATH, and
+restart the unit. To switch back, unset `GUARDRAIL_PATCH_BACKEND` (or set it to `ollama`).
+
+On camera: `nemoclaw guardrail status`, `nemoclaw guardrail policy list` (the egress
+policy the agent runs under) and the `model_used` field in the report.
+
 ---
 
 ## 2. Restore if something breaks

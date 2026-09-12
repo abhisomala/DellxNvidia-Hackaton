@@ -24,9 +24,13 @@ sys.path.insert(0, str(REPO_ROOT))
 from pipeline.patch_parse import extract_code  # noqa: E402
 from pipeline.patch_prompt import build_prompt, edit_region, locate_violation  # noqa: E402
 from pipeline.patch_validate import validate  # noqa: E402
+from pipeline import patch_nemoclaw  # noqa: E402
 
 MODEL = os.environ.get("GUARDRAIL_PATCH_MODEL", "gemma4:26b")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+# ollama (default): call Ollama directly | nemoclaw: the OpenClaw agent in a NemoClaw/OpenShell
+# sandbox, whose inference OpenShell routes to that same Ollama model (pipeline/patch_nemoclaw.py)
+BACKEND = os.environ.get("GUARDRAIL_PATCH_BACKEND", "ollama")
 STAGED = REPO_ROOT / "pipeline" / "staged_violations.json"
 DEFAULT_OUT = REPO_ROOT / "pipeline" / "runs" / "patch-tests"
 
@@ -48,6 +52,13 @@ def call_model(prompt: str) -> tuple[str, dict]:
     Bounded by ``MODEL_TIMEOUT_S``: an offline or stuck model is a clear
     ``PatchGenerationError``, never a hang.
     """
+    if BACKEND == "nemoclaw":
+        try:
+            return patch_nemoclaw.call_nemoclaw(prompt)
+        except patch_nemoclaw.NemoClawError as exc:
+            raise PatchGenerationError(f"nemoclaw sandbox {patch_nemoclaw.SANDBOX} ({MODEL}): {exc}") from exc
+    if BACKEND != "ollama":
+        raise PatchGenerationError(f"unknown GUARDRAIL_PATCH_BACKEND {BACKEND!r}; expected ollama | nemoclaw")
     body = json.dumps({
         "model": MODEL, "prompt": prompt, "stream": False, "think": False,
         "options": {"temperature": 0.2, "num_predict": 1024},
@@ -126,7 +137,7 @@ def build_patch(violation: dict, source_text: str | None = None, *, repo_root: P
         "patch_diff": "".join(difflib.unified_diff(
             lines, patched_lines, fromfile=f"a/{source_file}", tofile=f"b/{source_file}", n=3,
         )),
-        "model_used": f"ollama:{MODEL}",
+        "model_used": f"nemoclaw:{patch_nemoclaw.SANDBOX}/ollama:{MODEL}" if BACKEND == "nemoclaw" else f"ollama:{MODEL}",
         "prompt": prompt,
         "raw_response": raw,
         "latency_s": stats["latency_s"],
