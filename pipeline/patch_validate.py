@@ -54,7 +54,9 @@ def _check_js(text: str, suffix: str) -> tuple[bool, str]:
     with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as fh:
         fh.write(text)
     try:
-        proc = subprocess.run([node, "--check", fh.name], capture_output=True, text=True)
+        proc = subprocess.run([node, "--check", fh.name], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return False, "node --check timed out after 30s"
     finally:
         Path(fh.name).unlink()
     lines = [l for l in proc.stderr.splitlines()

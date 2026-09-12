@@ -58,6 +58,8 @@ export async function judge(o, { violation, diff }, { log = () => {} } = {}) {
     '```diff', diff.slice(0, 12000), '```',
   ].filter(Boolean).join('\n');
   const body = { model: o.judgeModel, temperature: 0, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 800 };
+  // Reasoning models (e.g. gemma4 on Ollama) otherwise spend max_tokens on hidden reasoning and return no content.
+  if (typeof o.judgeReasoningEffort === 'string' && o.judgeReasoningEffort) body.reasoning_effort = o.judgeReasoningEffort;
   log(`judge: ${o.judgeUrl} model=${o.judgeModel}`);
   const t0 = Date.now();
   const unavailable = (why) => {

@@ -9,6 +9,7 @@ and must answer with the replacement text for exactly that region.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -27,34 +28,70 @@ RULE_NOTES = {
         "Plain HTML (not JSX, so use for=, not htmlFor=): add a visible <label for=\"<input id>\"> whose text says what the "
         "field is (the placeholder text is a good label) right before the input, inside the same wrapper, like sibling fields."
     ),
+    "keyboard-unreachable": (
+        "This is plain browser JavaScript, not React: no JSX, no hooks, no state setters. Do NOT add buttons or "
+        "elements. Fix only the Tab handling inside the EXISTING modal keydown listener: instead of always focusing "
+        "one fixed element, collect the focusable elements inside the modal at keydown time (a[href], button, input, "
+        "select, textarea, [tabindex]:not([tabindex=\"-1\"])) with Array.from; if the list is empty, return; call "
+        "event.preventDefault(); find the index of document.activeElement in the list; if it is -1 (focus is not on one "
+        "of them) focus the first (Tab) or the last (Shift+Tab); otherwise focus (index + step + length) % length with "
+        "step 1 for Tab and -1 for Shift+Tab, so every control is reached in DOM order, focus wraps, and focus never "
+        "leaves the modal. Keep the existing Escape branch (modal.hidden = true) and every other line of the file identical."
+    ),
     "keyboard-trap": (
-        "This is vanilla JS, not React, and the dialog already has a Close button: do NOT add buttons. "
-        "Fix the keydown handler so Tab / Shift+Tab move through ALL focusable elements inside the dialog "
-        "(buttons, links, inputs), wrapping last->first on Tab and first->last on Shift+Tab, "
-        "without preventing default when focus can move normally. Escape must still close the dialog."
+        "This is plain browser JavaScript, not React. The dialog already has a Close button: do NOT add buttons. "
+        "Add an Escape branch to the EXISTING modal keydown listener that closes the dialog the same way the Close "
+        "button does (modal.hidden = true), keep Tab inside the dialog, and leave every other line identical."
     ),
 }
 
 
+# Rules whose defect lives in behaviour (event handlers), not markup.  The same
+# test is locate.mjs's RULE_BOOSTS entry, which ranks the file holding the
+# keydown / focus logic first when no file is forced on it.
+BEHAVIOUR_RULE = re.compile(r"^keyboard-|focus")
+LOCATE_TIMEOUT_S = 60
+
+
 def locate_violation(violation: dict[str, Any], repo_root: Path) -> dict[str, Any]:
-    """Run locate.mjs on the violation; returns {file, line, snippet, totalLines, method, ...}."""
+    """Run locate.mjs on the violation; returns {file, line, snippet, totalLines, method, ...}.
+
+    ``file`` is relative to the scanned page's directory.  For markup rules the
+    scanned file is passed as a hint.  For keyboard/focus rules the scan names
+    the page (``index.html``) but the defect is in the script, so no file is
+    forced and only the element's opening tag is used as a token source: the
+    dialog's full rendered HTML repeats every class of its children, which
+    would otherwise outscore the keydown handler and land the patch in markup.
+    """
     source_file = Path(violation["source_file"])
     app_root = repo_root / source_file.parent
     rule_id = violation["rule_id"]
+    behavioural = bool(BEHAVIOUR_RULE.search(rule_id))
+    html = violation.get("html") or ""
+    if behavioural:
+        opening = re.match(r"\s*<[^>]*>", html)
+        html = opening.group(0) if opening else html
     payload = {
         "id": f"{rule_id}#0",
         "rule_id": rule_id,
         "selector": violation.get("selector") or "",
-        "html": violation.get("html") or "",
+        "html": html,
         "description": violation.get("description") or "",
         "help": violation.get("help") or "",
         "repro": violation.get("repro"),
-        "source": {"file": source_file.name},
     }
-    proc = subprocess.run(
-        ["node", str(repo_root / "pipeline" / "locate_cli.mjs"), str(app_root)],
-        input=json.dumps(payload), capture_output=True, text=True, check=True, cwd=repo_root,
-    )
+    if not behavioural:
+        payload["source"] = {"file": source_file.name}
+    try:
+        proc = subprocess.run(
+            ["node", str(repo_root / "pipeline" / "locate_cli.mjs"), str(app_root)],
+            input=json.dumps(payload), capture_output=True, text=True, cwd=repo_root,
+            timeout=LOCATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"locate.mjs did not answer within {LOCATE_TIMEOUT_S}s") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(f"locate.mjs exited {proc.returncode}: {(proc.stderr or '').strip()[-800:]}")
     return json.loads(proc.stdout)
 
 
@@ -96,6 +133,8 @@ def build_prompt(
         out.append(f"- help: {_clip(violation['help'])}")
     if violation.get("html"):
         out.append(f"- rendered HTML: {_clip(violation['html'])}")
+    if violation.get("failure_summary"):
+        out.append(f"- scanner observation: {_clip(violation['failure_summary'])}")
     repro = violation.get("repro")
     if repro:
         out.append(

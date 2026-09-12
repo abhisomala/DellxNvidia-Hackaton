@@ -32,6 +32,7 @@ export const DEFAULTS = {
   maxFiles: 2,
   judgeUrl: process.env.A11Y_JUDGE_URL || process.env.OPENAI_BASE_URL || '',   // reviewer endpoint (OpenAI-compatible); '' = reviewer off
   judgeModel: process.env.A11Y_JUDGE_MODEL || process.env.OPENAI_MODEL || '',
+  judgeReasoningEffort: process.env.A11Y_JUDGE_REASONING_EFFORT || '',   // e.g. 'none' for gemma4 on Ollama; '' = field not sent
   judgeKey: process.env.A11Y_JUDGE_KEY || process.env.OPENAI_API_KEY || '',
 };
 

@@ -39,18 +39,30 @@ class PatchGenerationError(RuntimeError):
         self.result = result or {}
 
 
+MODEL_TIMEOUT_S = 300
+
+
 def call_model(prompt: str) -> tuple[str, dict]:
-    """POST the prompt to Ollama; return (response text, timing/token stats)."""
+    """POST the prompt to Ollama; return (response text, timing/token stats).
+
+    Bounded by ``MODEL_TIMEOUT_S``: an offline or stuck model is a clear
+    ``PatchGenerationError``, never a hang.
+    """
     body = json.dumps({
         "model": MODEL, "prompt": prompt, "stream": False, "think": False,
         "options": {"temperature": 0.2, "num_predict": 1024},
     }).encode()
-    request = urllib.request.Request(
-        f"{OLLAMA_URL}/api/generate", data=body, headers={"Content-Type": "application/json"}
-    )
+    url = f"{OLLAMA_URL}/api/generate"
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     started = time.monotonic()
-    with urllib.request.urlopen(request, timeout=600) as response:
-        data = json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=MODEL_TIMEOUT_S) as response:
+            data = json.loads(response.read())
+    except (OSError, ValueError) as exc:  # URLError, timeouts and bad JSON all land here
+        raise PatchGenerationError(
+            f"model call to {url} ({MODEL}) failed after {round(time.monotonic() - started, 1)}s "
+            f"(timeout {MODEL_TIMEOUT_S}s): {exc}"
+        ) from exc
     stats = {
         "latency_s": round(time.monotonic() - started, 2),
         "eval_count": data.get("eval_count"),
@@ -61,10 +73,33 @@ def call_model(prompt: str) -> tuple[str, dict]:
     return data.get("response") or "", stats
 
 
-def build_patch(violation: dict, source_text: str, *, repo_root: Path = REPO_ROOT) -> dict:
-    """Generate, splice, validate and diff a model-authored patch for ``violation``."""
-    source_file = violation["source_file"]
+def _repo_relative(path: Path, repo_root: Path) -> str:
+    try:
+        return str(path.relative_to(repo_root.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def build_patch(violation: dict, source_text: str | None = None, *, repo_root: Path = REPO_ROOT) -> dict:
+    """Generate, splice, validate and diff a model-authored patch for ``violation``.
+
+    The file patched is the one ``locate.mjs`` found, which for keyboard rules is
+    the script rather than the scanned page.  ``source_text`` is used only when
+    it belongs to that located file; otherwise the located file is read here.
+    ``result['source_file']`` is the located file, repo-relative.
+    """
     location = locate_violation(violation, repo_root)
+    if not location.get("file"):
+        raise PatchGenerationError(f"locate.mjs returned no file for {violation.get('rule_id')}")
+    app_root = repo_root / Path(violation["source_file"]).parent
+    located = (app_root / location["file"]).resolve()
+    if not located.is_file():
+        raise PatchGenerationError(f"located source {located} does not exist")
+    source_file = _repo_relative(located, repo_root)
+    scanned = (repo_root / violation["source_file"]).resolve()
+    if source_text is None or scanned != located:
+        source_text = located.read_text()
+
     start, end = edit_region(source_text, location.get("line"))
     prompt = build_prompt(violation, source_file, source_text, (start, end))
     raw, stats = call_model(prompt)
@@ -82,9 +117,11 @@ def build_patch(violation: dict, source_text: str, *, repo_root: Path = REPO_ROO
         "rule_id": violation["rule_id"],
         "selector": violation.get("selector", ""),
         "source_file": source_file,
+        "scanned_file": violation["source_file"],
         "line": location.get("line") or start,
         "original_snippet": original.strip(),
         "patched_snippet": replacement.strip(),
+        "original_text": source_text,
         "patched_text": patched_text,
         "patch_diff": "".join(difflib.unified_diff(
             lines, patched_lines, fromfile=f"a/{source_file}", tofile=f"b/{source_file}", n=3,
@@ -114,16 +151,15 @@ def main() -> int:
     args = parser.parse_args()
 
     violation = json.loads(STAGED.read_text())[args.rule]
-    source_text = (REPO_ROOT / violation["source_file"]).read_text()
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
-        result, code = build_patch(violation, source_text), 0
+        result, code = build_patch(violation), 0
     except PatchGenerationError as exc:
         result, code = exc.result, 1
         print(f"PATCH FAILED: {exc}", file=sys.stderr)
 
-    print(f"rule:    {args.rule} ({MODEL})")
+    print(f"rule:    {args.rule} ({MODEL}) -> {result.get('source_file')}")
     print(f"latency: {result.get('latency_s')}s  region: {result.get('region')}  "
           f"method: {result.get('location_method')}")
     print(f"valid:   {result.get('valid')} {result.get('validation_error') or ''}")
