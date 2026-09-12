@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Harbor &amp; Pine | Local provisions</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top">Harbor <span>&amp;</span> Pine</a>
+      <nav aria-label="Primary navigation">
+        <a href="#shop">Shop</a><a href="#visit">Visit</a><a href="#contact">Contact</a>
+      </nav>
+      <button class="bag-button" type="button" data-open-modal></button>
+    </header>
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div>
+          <p class="eyebrow">Small-batch pantry goods</p>
+          <h1 id="hero-title">Good things for unhurried tables.</h1>
+          <p class="hero-copy">Seasonal jams, thoughtful pantry staples, and easy gifts from our little shop on the harbor.</p>
+          <a class="button button-dark" href="#contact">Build a gift box</a>
+        </div>
+        <div class="hero-art" aria-hidden="true"><div class="sun"></div><div class="jar jar-one"></div><div class="jar jar-two"></div></div>
+      </section>
+      <section class="products" id="shop" aria-labelledby="products-title">
+        <div class="section-heading"><div><p class="eyebrow">From the shelf</p><h2 id="products-title">Made for gathering</h2></div><a href="#contact">See all provisions</a></div>
+        <div class="product-grid">
+          <article class="product-card"><div class="product-image image-amber" aria-hidden="true"></div><p>Preserves</p><h3>Apricot &amp; Vanilla Jam</h3><span>$12</span></article>
+          <article class="product-card"><div class="product-image image-sage" aria-hidden="true"></div><p>Pantry</p><h3>Sea Salt Herb Blend</h3><span>$10</span></article>
+          <article class="product-card"><div class="product-image image-rose" aria-hidden="true"></div><p>Gifts</p><h3>Sunday Morning Box</h3><span>$42</span></article>
+        </div>
+      </section>
+      <section class="visit" id="visit" aria-labelledby="visit-title">
+        <div><p class="eyebrow">Come say hello</p><h2 id="visit-title">A neighborhood shop with a long table.</h2></div>
+        <div class="visit-details"><p><strong>Open Thursday–Sunday</strong><br />10am–5pm</p><p>18 Wharf Lane<br />Port Mason, ME</p><button class="text-button" type="button" data-open-modal>View shop hours</button></div>
+      </section>
+      <section class="contact" id="contact" aria-labelledby="contact-title">
+        <div><p class="eyebrow">Gift concierge</p><h2 id="contact-title">Tell us what you're celebrating.</h2><p>We'll put together a gift box that feels personal, useful, and ready to share.</p></div>
+        <form id="gift-form" class="gift-form">
+          <div><label for="customer-name">Your name</label><input id="customer-name" name="name" type="text" autocomplete="name" required /></div>
+          <div><input id="customer-email" name="email" type="email" placeholder="Email address" autocomplete="email" required /></div>
+          <div><label for="occasion">What's the occasion?</label><select id="occasion" name="occasion"><option>Thank you</option><option>New home</option><option>Birthday</option><option>Just because</option></select></div>
+          <button class="button button-light" type="submit">Start my box</button>
+          <p class="form-status" id="form-status" role="status"></p>
+        </form>
+      </section>
+    </main>
+    <footer><p>© 2026 Harbor &amp; Pine</p><p>Thoughtfully stocked by the sea.</p></footer>
+    <div class="modal-backdrop" id="hours-modal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-label="Shop hours">
+        <button class="modal-close" type="button" data-close-modal>Close</button>
+        <p class="eyebrow">Harbor &amp; Pine</p><h2>Shop hours</h2><p>Thursday–Sunday, 10am–5pm<br />Closed Monday–Wednesday</p>
+        <a class="button button-dark" href="#visit" data-close-modal>Get directions</a>
+      </section>
+    </div>
+    <script src="script.js"></script>
+  </body>
+</html>
