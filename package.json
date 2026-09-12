@@ -1,5 +1,11 @@
 {
+  "scripts": {
+    "a11y:scan": "node scripts/a11y-scan.js"
+  },
   "devDependencies": {
     "axe-core": "^4.13.0"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
   }
 }
